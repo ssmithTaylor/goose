@@ -266,6 +266,7 @@ impl AcpConnection {
         let target = SessionTarget {
             session_id: session_id.clone(),
             cancel_token: Some(cancel_token.clone()),
+            parent_session_id: None,
         };
         while let Some(event) = stream.next().await {
             if cancel_token.is_cancelled() {

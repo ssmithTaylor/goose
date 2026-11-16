@@ -149,7 +149,10 @@ impl SubagentRunner<Session> for ForegroundSubagentRunner {
             start_notice(subagent_session_id, task)
         };
         let notice = SubagentUpdate::ToParent(inline_notice(notice));
-        Box::pin(stream::once(future::ready(notice)).chain(self.spawn(subagent, cancel)))
+        let parent_id = parent_session.id.clone();
+        Box::pin(
+            stream::once(future::ready(notice)).chain(self.spawn(subagent, parent_id, &cancel)),
+        )
     }
 
     fn on_subagent_finished(
@@ -159,8 +162,15 @@ impl SubagentRunner<Session> for ForegroundSubagentRunner {
         remaining: usize,
         emit: &Emitter,
     ) {
-        let show_output = remaining > 0 || emit.cancel_token().is_cancelled();
-        if let Some(notice) = finished_notice(subagent_session_id, outcome, show_output) {
+        let parent_cancelled = emit.cancel_token().is_cancelled();
+        let show_output = remaining > 0 || parent_cancelled;
+        let notice = match outcome {
+            SubagentOutcome::Cancelled if !parent_cancelled => {
+                Some(format!("Subagent {subagent_session_id} stopped"))
+            }
+            _ => finished_notice(subagent_session_id, outcome, show_output),
+        };
+        if let Some(notice) = notice {
             emit.message(inline_notice(notice));
         }
     }

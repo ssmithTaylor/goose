@@ -21,6 +21,7 @@ use crate::agents::state_machine::{
     Operation, StateMachine, DEFAULT_BLOCK_CAP,
 };
 use crate::agents::state_machine_builder::{build_state_machine, StateMachineConfig};
+use crate::agents::subagent_events::SubagentEventHub;
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::types::{
     SessionConfig, DEFAULT_ON_FAILURE_TIMEOUT_SECONDS, DEFAULT_RETRY_TIMEOUT_SECONDS,
@@ -328,6 +329,7 @@ pub struct StateMachineServices {
     pub goose_platform: GoosePlatform,
     pub disable_session_naming: bool,
     pub runtime: SessionRuntime,
+    pub(crate) subagent_events: Arc<SubagentEventHub>,
 
     pub extension_manager: Arc<ExtensionManager>,
 
@@ -336,7 +338,7 @@ pub struct StateMachineServices {
     turn_settings: Option<TurnSettings>,
 }
 
-fn user_event(event: AgentEvent) -> Option<AgentEvent> {
+pub(super) fn user_event(event: AgentEvent) -> Option<AgentEvent> {
     match event {
         AgentEvent::Message(message) => {
             let had_content = !message.content.is_empty();
@@ -378,6 +380,7 @@ impl StateMachineServices {
             goose_platform: config.goose_platform,
             disable_session_naming: config.disable_session_naming,
             runtime: SessionRuntime::new(config.max_sessions),
+            subagent_events: Arc::default(),
             hook_manager: config.hooks.unwrap_or_else(|| {
                 crate::hooks::HookManager::load(std::env::current_dir().ok().as_deref())
             }),

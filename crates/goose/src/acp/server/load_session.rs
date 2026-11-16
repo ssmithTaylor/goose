@@ -238,6 +238,7 @@ impl AcpConnection {
                 SessionTarget {
                     session_id: session_id.to_string(),
                     cancel_token: cancel_token.clone(),
+                    parent_session_id: None,
                 },
             )?;
         }
@@ -314,6 +315,7 @@ impl AcpConnection {
                     &task_cx,
                     &task_acp_session_id,
                     &task_session_id,
+                    None,
                     &mut None,
                 )
                 .await
