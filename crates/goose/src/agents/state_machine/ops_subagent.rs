@@ -13,12 +13,14 @@ use crate::agents::final_output_tool::FinalOutputTool;
 use crate::agents::state_machine::{
     applied, not_applicable, yielded, Emitter, GooseEffect, Operation, OperationResult,
 };
-use crate::agents::subagent_coordination::{waiting_note, SubagentCoordination};
+use crate::agents::subagent_coordination::{
+    waiting_note, RunningSubagent, SubagentCoordination, SubagentParentTools,
+};
 use crate::agents::subagent_events::{SubagentEventHub, SubagentModel};
 use crate::agents::subagent_handler::{subagent_model, ForegroundSubagentRunner};
 use crate::conversation::message::{Message, MessageContent, SystemNotificationType};
 use crate::conversation::Conversation;
-use crate::session::{Session, SessionType};
+use crate::session::{Session, SessionManager, SessionType};
 use crate::utils::safe_truncate;
 
 // Predates background subagents' removal and lives on in session histories, where older
@@ -30,12 +32,19 @@ fn inline_notice(text: String) -> Message {
     Message::assistant().with_system_notification(SystemNotificationType::InlineMessage, text)
 }
 
+fn task_snippet(task: &str) -> String {
+    let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    safe_truncate(&task, TASK_SNIPPET_CHARS)
+}
+
+fn subagent_task(subagent: &Session) -> Option<&str> {
+    let recipe = subagent.recipe.as_ref()?;
+    recipe.prompt.as_deref().or(recipe.instructions.as_deref())
+}
+
 fn start_notice(subagent_id: &str, task: Option<&str>) -> String {
     let snippet = task
-        .map(|task| {
-            let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
-            format!(" ({})", safe_truncate(&task, TASK_SNIPPET_CHARS))
-        })
+        .map(|task| format!(" ({})", task_snippet(task)))
         .unwrap_or_default();
     format!("Running subagent {subagent_id}{snippet}")
 }
@@ -195,21 +204,47 @@ fn model_call_next(conversation: &Conversation) -> bool {
     })
 }
 
-/// While a parent waits on its subagents: tells it what is still running and which questions
-/// wait for its answer, and adds the notes it should read before its next response.
+/// While a parent's subagents run: tells it which are running, what each was asked and on which
+/// model, what it may do meanwhile and which questions wait for its answer, and adds the notes
+/// it should read before its next response.
 pub(crate) struct SubagentCoordinationOperation {
     subagent_events: Arc<SubagentEventHub>,
     coordination: Arc<SubagentCoordination>,
+    session_manager: Arc<SessionManager>,
+    parent_tools: SubagentParentTools,
 }
 
 impl SubagentCoordinationOperation {
     pub(crate) fn new(
         subagent_events: Arc<SubagentEventHub>,
         coordination: Arc<SubagentCoordination>,
+        session_manager: Arc<SessionManager>,
+        parent_tools: SubagentParentTools,
     ) -> Self {
         Self {
             subagent_events,
             coordination,
+            session_manager,
+            parent_tools,
+        }
+    }
+
+    async fn describe(&self, subagent_session_id: String) -> RunningSubagent {
+        let Ok(subagent) = self
+            .session_manager
+            .get_session(&subagent_session_id, false)
+            .await
+        else {
+            return RunningSubagent {
+                id: subagent_session_id,
+                task: None,
+                model: None,
+            };
+        };
+        RunningSubagent {
+            task: subagent_task(&subagent).map(task_snippet),
+            model: subagent_model(&subagent).model,
+            id: subagent_session_id,
         }
     }
 }
@@ -229,8 +264,9 @@ impl Operation<Session, GooseEffect> for SubagentCoordinationOperation {
         if running.is_empty() {
             return Ok(Vec::new());
         }
+        let running = future::join_all(running.into_iter().map(|id| self.describe(id))).await;
         let questions = self.coordination.questions_for(&session.id);
-        Ok(vec![waiting_note(&running, &questions)])
+        Ok(vec![waiting_note(self.parent_tools, &running, &questions)])
     }
 
     async fn run(

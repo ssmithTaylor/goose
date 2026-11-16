@@ -94,7 +94,7 @@ async fn interrupted_inference_saves_streamed_output_then_answers_its_request() 
     let session = tokio::time::timeout(
         Duration::from_secs(5),
         crate::agents::state_machine::session::run(
-            &machine,
+            &machine.into(),
             pipeline.session_manager.as_ref(),
             &pipeline.session_id,
             &emit,

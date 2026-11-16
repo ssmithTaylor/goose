@@ -190,6 +190,7 @@ async fn recipe_delegation_respects_mode_and_child_turn_limit() -> Result<()> {
     result.assert_message(-1, Agent, "delegation stayed in chat");
 
     let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_coordinating_parent();
     pipeline.remove_extension("todo").await?;
     let host = api.uri();
     let _guard = env_lock::lock_env([
@@ -266,6 +267,7 @@ settings:
 #[tokio::test]
 async fn final_output_beside_delegate_is_not_shown_before_the_subagent_runs() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_coordinating_parent();
     let pipeline = pipeline.with_max_turns(2);
     let host = api.uri();
     let _guard = env_lock::lock_env([

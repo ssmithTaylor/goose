@@ -72,9 +72,13 @@ If a subagent fails or times out (5-minute default), you will receive no output 
 
 ## Steering and Stopping Subagents
 
-Delegation is synchronous: goose's turn stays open until every subagent it started has finished. While they run:
+goose's turn stays open until every subagent it started has finished, but goose doesn't sit idle meanwhile. After delegating, it keeps working on the main task with all of its tools, and each subagent's result reaches it automatically when that subagent finishes. goose knows which subagents are running and what each was asked to do, and avoids editing what they are working on. When goose finishes its own work first, it waits for the remaining results and then continues. Your approval mode and hooks apply to every tool goose calls. If goose reaches its turn limit or hits an error while subagents run, the turn ends, the subagents are stopped, and goose is told which ones were cancelled.
 
-- **Steer the main chat.** Messages you send to the main chat are applied straight away, and goose responds while its subagents keep working. Until they finish, goose can only steer or wrap up a subagent, start another subagent, or use read-only tools (tools whose MCP annotations mark them `readOnlyHint: true`); every other tool becomes available again once the subagents return. Your approval mode and hooks still apply.
+To have goose wait for its subagents instead, set `GOOSE_SUBAGENT_PARENT_TOOLS: coordination` in your [config file](/docs/guides/config-files). goose then works only when you steer it or a subagent asks it a question, and until the subagents finish it can only steer or wrap up a subagent, start another subagent, or use read-only tools (tools whose MCP annotations mark them `readOnlyHint: true`). The default is `full`.
+
+While subagents run:
+
+- **Steer the main chat.** Messages you send to the main chat are applied straight away, and goose responds while its subagents keep working.
 - **Steer one subagent.** In goose Desktop, use the steer box in the subagent's view. goose is also told what you said, so its picture of the work stays accurate. Over ACP, call `_goose/unstable/session/steer` with the subagent's session ID and its `activeRunId`.
 - **Stop one subagent.** Use **Stop** in the subagent's view, or ACP `session/cancel` with the subagent's session ID. Only that subagent stops; goose and the other subagents continue, and goose is told the subagent was stopped.
 - **Switch a subagent's model.** Use **Model** in the subagent's view. The new model applies from the subagent's next model call, in the same session.

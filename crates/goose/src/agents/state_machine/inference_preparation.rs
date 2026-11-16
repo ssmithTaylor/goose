@@ -1,7 +1,7 @@
 //! Goose-specific inference request preparation.
 
 use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
-use crate::agents::subagent_coordination::available_while_subagents_run;
+use crate::agents::subagent_coordination::{available_while_subagents_run, SubagentParentTools};
 use crate::agents::subagent_events::SubagentEventHub;
 use crate::agents::PromptManager;
 use crate::config::GooseMode;
@@ -21,6 +21,7 @@ pub struct GooseInferenceRequestPreparer<'a> {
     pub(crate) tool_inspection_manager: &'a ToolInspectionManager,
     pub(crate) context_limit: usize,
     pub(crate) subagent_events: Arc<SubagentEventHub>,
+    pub(crate) subagent_parent_tools: SubagentParentTools,
 }
 
 #[async_trait]
@@ -43,10 +44,11 @@ impl InferenceRequestPreparer<Session> for GooseInferenceRequestPreparer<'_> {
         conversation: &Conversation,
         mut input: InferenceInput,
     ) -> Result<PreparedInferenceRequest> {
-        if !self
-            .subagent_events
-            .running_subagents_of(&session.id)
-            .is_empty()
+        if self.subagent_parent_tools == SubagentParentTools::Coordination
+            && !self
+                .subagent_events
+                .running_subagents_of(&session.id)
+                .is_empty()
         {
             input.tools.retain(available_while_subagents_run);
         }

@@ -564,3 +564,155 @@ async fn results_wait_for_the_parents_open_tool_calls() {
         ["Subagent a completed: done"]
     );
 }
+
+fn working_operation(
+    runner: &Arc<FakeRunner>,
+) -> (
+    SubagentOperation<Parent>,
+    Arc<tokio::sync::Notify>,
+    goose_agent::steer::SteerQueue,
+) {
+    let (operation, signal, steers) = woken_operation(runner);
+    (operation.with_parent_working(), signal, steers)
+}
+
+fn tool_call(id: &str) -> Message {
+    Message::assistant().with_tool_request(id, Ok(rmcp::model::CallToolRequestParams::new("shell")))
+}
+
+fn tool_result(id: &str) -> Message {
+    Message::user().with_tool_response(id, Ok(rmcp::model::CallToolResult::success(Vec::new())))
+}
+
+fn without_waiting(operation: &SubagentOperation<Parent>, messages: &[Message]) -> Vec<Message> {
+    run_once(operation, messages)
+        .now_or_never()
+        .expect("the parent went on without waiting")
+}
+
+#[tokio::test]
+async fn a_working_parent_goes_on_while_its_subagent_runs() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let mut messages = vec![start(&["a"])];
+
+    assert!(without_waiting(&operation, &messages).is_empty());
+    messages.push(tool_call("call-1"));
+    messages.push(tool_result("call-1"));
+    assert!(without_waiting(&operation, &messages).is_empty());
+    messages.push(tool_call("call-2"));
+
+    a.to_parent("a is reading");
+    a.finish(SubagentOutcome::Completed("done".into()));
+    let (emit, mut rx) = watched_emitter();
+    let conversation = Conversation::new_unvalidated(messages.clone());
+    let waiting =
+        Operation::<Parent, ConversationEffect>::run(&operation, &Parent, &conversation, &emit)
+            .now_or_never();
+    assert!(waiting.is_none(), "a result landed inside a tool call");
+    assert_eq!(shown(&mut rx), ["a is reading"]);
+
+    messages.push(tool_result("call-2"));
+    assert_eq!(
+        texts(&without_waiting(&operation, &messages)),
+        ["Subagent a completed: done"]
+    );
+    assert_eq!(runner.started(), ["a"]);
+}
+
+#[tokio::test]
+async fn subagents_finishing_during_a_tool_call_are_each_delivered_once_after_it() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let b = runner.running("b");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let mut messages = vec![start(&["a", "b"])];
+    assert!(without_waiting(&operation, &messages).is_empty());
+    messages.push(tool_call("call-1"));
+
+    a.finish(SubagentOutcome::Completed("a done".into()));
+    b.finish(SubagentOutcome::Failed("boom".into()));
+    interrupt(&operation, &messages);
+    messages.push(tool_result("call-1"));
+
+    let mut delivered = Vec::new();
+    for _ in 0..2 {
+        let results = without_waiting(&operation, &messages);
+        assert_eq!(results.len(), 1);
+        delivered.extend(texts(&results));
+        messages.extend(results);
+    }
+    delivered.sort();
+    assert_eq!(
+        delivered,
+        ["Subagent a completed: a done", "Subagent b failed: boom"]
+    );
+    assert!(without_waiting(&operation, &messages).is_empty());
+    assert_eq!(runner.started(), ["a", "b"]);
+}
+
+#[tokio::test]
+async fn a_working_parent_that_ends_its_turn_waits_for_the_next_result() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let b = runner.running("b");
+    let (operation, signal, steers) = working_operation(&runner);
+    let mut messages = vec![
+        start(&["a", "b"]),
+        Message::assistant().with_text("my part is done"),
+    ];
+    interrupt(&operation, &messages);
+
+    a.finish(SubagentOutcome::Completed("a done".into()));
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_once(&operation, &messages),
+    )
+    .await
+    .unwrap();
+    assert_eq!(texts(&delivered), ["Subagent a completed: a done"]);
+    messages.extend(delivered);
+    assert!(without_waiting(&operation, &messages).is_empty());
+
+    messages.push(Message::assistant().with_text("waiting on b"));
+    let (steered, ()) = tokio::join!(run_once(&operation, &messages), async {
+        steers
+            .lock()
+            .await
+            .push_back(Message::user().with_text("any news?"));
+        signal.notify_one();
+    });
+    assert_eq!(texts(&steered), ["any news?"]);
+    messages.extend(steered);
+    assert!(without_waiting(&operation, &messages).is_empty());
+
+    messages.push(Message::assistant().with_text("still waiting on b"));
+    b.finish(SubagentOutcome::Completed("b done".into()));
+    assert_eq!(
+        texts(&run_once(&operation, &messages).await),
+        ["Subagent b completed: b done"]
+    );
+}
+
+#[tokio::test]
+async fn stopping_a_working_parent_delivers_finished_and_cancels_running_subagents() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let b = runner.running("b");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let mut messages = vec![start(&["a", "b"])];
+    assert!(without_waiting(&operation, &messages).is_empty());
+    messages.push(tool_call("call-1"));
+    messages.push(tool_result("call-1"));
+    a.finish(SubagentOutcome::Completed("a done".into()));
+
+    assert_eq!(
+        texts(&stop(&operation, &messages).await),
+        [
+            "Subagent a completed: a done",
+            "Subagent b was cancelled before it finished."
+        ]
+    );
+    assert!(b.is_closed());
+}

@@ -21,6 +21,7 @@ use crate::acp::server::AcpConnection;
 use crate::agents::extension::ExtensionConfig;
 use crate::agents::mcp_client::McpClientTrait;
 use crate::agents::state_machine::ops_toolcalling::EXPIRED_APPROVAL_RESPONSE;
+use crate::agents::subagent_coordination::PARENT_TOOLS_CONFIG_KEY;
 use crate::agents::{
     AgentEvent, GoosePlatform, SessionConfig, StateMachineServices, StateMachineServicesConfig,
 };
@@ -1028,6 +1029,8 @@ async fn a_subagent_runs_the_parents_hooks_and_is_released_when_it_finishes() ->
         crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME,
         json!({ "summary": "printed it" }),
     );
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on("printed it").reply("the subagent printed it");
 
     reply_messages(
@@ -1197,6 +1200,8 @@ async fn a_subagent_asks_the_parents_client_for_approval_in_the_parents_mode() -
         crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME,
         json!({ "summary": "printed it" }),
     );
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on("printed it").reply("the subagent printed it");
 
     let mut stream = services
@@ -1288,6 +1293,8 @@ async fn a_subagents_elicitation_is_answered_by_the_parents_client() -> Result<(
         crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME,
         json!({ "summary": "it was Ada" }),
     );
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on("it was Ada").reply("Ada asked");
 
     let mut stream = services
@@ -1377,6 +1384,8 @@ async fn concurrent_subagents_get_their_own_answers_for_the_same_tool_call_id() 
             crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME,
             json!({ "summary": "denied one stopped" }),
         );
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on("denied one stopped").reply("both are back");
 
     let mut stream = services
@@ -1543,11 +1552,19 @@ async fn cancelling_the_parent_ends_a_waiting_subagent() -> Result<()> {
 }
 
 pub(super) fn openai_env_for(api: &DummyApi) -> env_lock::EnvGuard<'static> {
+    openai_env_with_parent_tools(api, None)
+}
+
+pub(super) fn openai_env_with_parent_tools(
+    api: &DummyApi,
+    parent_tools: Option<&str>,
+) -> env_lock::EnvGuard<'static> {
     env_lock::lock_env([
         ("OPENAI_API_KEY", Some("fake-openai-no-keyring".to_string())),
         ("OPENAI_HOST", Some(api.uri())),
         ("OPENAI_BASE_PATH", Some("chat/completions".to_string())),
         ("OPENAI_CUSTOM_HEADERS", Some(String::new())),
+        (PARENT_TOOLS_CONFIG_KEY, parent_tools.map(str::to_string)),
     ])
 }
 

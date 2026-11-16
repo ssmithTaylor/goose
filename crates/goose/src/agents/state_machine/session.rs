@@ -250,7 +250,7 @@ impl EffectUsage<GooseEffect> for SessionManager {
 }
 
 pub(crate) async fn run(
-    machine: &crate::agents::state_machine::StateMachine<'_, Session, GooseEffect>,
+    machine: &crate::agents::state_machine_builder::GooseStateMachine<'_>,
     runtime: &SessionManager,
     session_id: &str,
     emit: &Emitter,
@@ -281,7 +281,20 @@ pub(crate) async fn run(
         session_manager: runtime,
         usage: Default::default(),
     };
-    let session = machine.run(&runtime, session_id, emit).await?;
+    let session = match machine.run(&runtime, session_id, emit).await {
+        Ok(session) => session,
+        Err(error) => {
+            let stopped = match runtime.load(session_id).await {
+                Ok(session) => machine.stop_subagents(&runtime, session, emit).await,
+                Err(load_error) => Err(load_error),
+            };
+            if let Err(stop_error) = stopped {
+                tracing::error!("could not report subagents after a failed turn: {stop_error}");
+            }
+            return Err(error);
+        }
+    };
+    let session = machine.stop_subagents(&runtime, session, emit).await?;
     let turn_usage = runtime.usage.into_inner().unwrap();
     let last_assistant_text = session
         .conversation()

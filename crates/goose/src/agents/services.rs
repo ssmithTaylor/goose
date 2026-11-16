@@ -18,9 +18,12 @@ use crate::agents::session_runtime::{Attachment, SessionRuntime};
 use crate::agents::state_machine::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
     persist_tool_confirmation_decision, run_goose, AutoEffortOperation, Emitter, GooseEffect,
-    Operation, StateMachine, DEFAULT_BLOCK_CAP,
+    Operation, DEFAULT_BLOCK_CAP,
 };
-use crate::agents::state_machine_builder::{build_state_machine, StateMachineConfig};
+use crate::agents::state_machine_builder::{
+    build_state_machine, GooseStateMachine, StateMachineConfig,
+};
+use crate::agents::subagent_coordination::SubagentParentTools;
 use crate::agents::subagent_events::{SubagentEventHub, SubagentLiveEvent, SubagentLiveUpdate};
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::types::{
@@ -126,6 +129,7 @@ pub struct TurnSettings {
     pub tool_call_cutoff: Option<usize>,
     pub auto_effort: Option<Arc<dyn Operation<Session, GooseEffect>>>,
     pub context_relevance: Option<Arc<dyn goose_providers::decision::DecisionProvider>>,
+    pub subagent_parent_tools: SubagentParentTools,
 }
 
 impl TurnSettings {
@@ -172,6 +176,7 @@ impl TurnSettings {
             context_relevance: crate::agents::state_machine_builder::context_relevance_provider(
                 config, provider,
             ),
+            subagent_parent_tools: SubagentParentTools::from_config(config),
         }
     }
 }
@@ -742,7 +747,7 @@ impl StateMachineServices {
         session_config: SessionConfig,
         cancel: CancellationToken,
         steer_queue: SteerQueue,
-    ) -> StateMachine<'_, Session, GooseEffect> {
+    ) -> GooseStateMachine<'_> {
         let extension_lease = self
             .runtime
             .confirmations
@@ -770,7 +775,7 @@ impl StateMachineServices {
         cancel: CancellationToken,
         steer_queue: SteerQueue,
         extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
-    ) -> StateMachine<'_, Session, GooseEffect> {
+    ) -> GooseStateMachine<'_> {
         let settings = match &self.turn_settings {
             Some(settings) => settings.clone(),
             None => TurnSettings::from_config(provider.as_ref(), &model_config),
@@ -809,6 +814,7 @@ impl StateMachineServices {
             extra_operations: settings.auto_effort.into_iter().collect(),
             cancel,
             context_relevance: settings.context_relevance,
+            subagent_parent_tools: settings.subagent_parent_tools,
         })
     }
 
@@ -1037,6 +1043,16 @@ impl StateMachineServices {
             .collect()
     }
 
+    /// While its subagents run, a turn picks up confirmation answers without stopping, so a
+    /// confirmation it asked for may already be applied when the run ends.
+    async fn confirmations_outstanding(&self, session_id: &str) -> Result<bool> {
+        let session = self.session_manager.get_session(session_id, true).await?;
+        Ok(session.conversation.as_ref().is_some_and(|conversation| {
+            !pending_tool_confirmations(conversation).is_empty()
+                || has_unapplied_tool_confirmation_response(conversation)
+        }))
+    }
+
     /// Runs the state machine, and again each time the confirmations it stopped for are
     /// all answered. `run_first` is false when the turn starts by waiting for answers.
     fn turn(
@@ -1070,7 +1086,9 @@ impl StateMachineServices {
                         }
                         yield event;
                     }
-                    if !has_confirmations {
+                    if !has_confirmations
+                        || !services.confirmations_outstanding(&session_config.id).await?
+                    {
                         break;
                     }
                 }

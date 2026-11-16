@@ -1,4 +1,6 @@
-//! A parent that responds to the user and to its subagents while they run.
+//! A parent that responds to the user and to its subagents while they run, offered only
+//! coordination, `delegate` and read-only tools meanwhile (`GOOSE_SUBAGENT_PARENT_TOOLS:
+//! coordination`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +11,8 @@ use goose_agent::subagent::SubagentOutcome;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::agent_reply::{agent_with_dummy_api, enable_summon, openai_env_for};
+use super::agent_reply::{agent_with_dummy_api, enable_summon, openai_env_with_parent_tools};
+use super::dummy_api::DummyApi;
 use super::subagent_live_control::{
     delegate, drain, finished, outcome_of, record_until, started_runs, subagent_for,
 };
@@ -19,6 +22,10 @@ use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate, Suba
 use crate::agents::{SessionConfig, StateMachineServices};
 use crate::conversation::message::{Message, MessageContent};
 use crate::conversation::Conversation;
+
+fn coordination_env_for(api: &DummyApi) -> env_lock::EnvGuard<'static> {
+    openai_env_with_parent_tools(api, Some("coordination"))
+}
 
 fn reply_task(
     services: &Arc<StateMachineServices>,
@@ -51,9 +58,12 @@ fn reply_task(
 
 /// The mock answers one request at a time while a held response blocks it, so subagents that
 /// must keep running while the parent responds are slowed down instead.
-const SUBAGENT_BUSY: Duration = Duration::from_secs(4);
+pub(super) const SUBAGENT_BUSY: Duration = Duration::from_secs(4);
 
-async fn conversation(services: &StateMachineServices, session_id: &str) -> Result<Conversation> {
+pub(super) async fn conversation(
+    services: &StateMachineServices,
+    session_id: &str,
+) -> Result<Conversation> {
     Ok(services
         .session_manager
         .get_session(session_id, true)
@@ -62,7 +72,7 @@ async fn conversation(services: &StateMachineServices, session_id: &str) -> Resu
         .unwrap_or_else(Conversation::empty))
 }
 
-fn position(conversation: &Conversation, text: &str) -> usize {
+pub(super) fn position(conversation: &Conversation, text: &str) -> usize {
     conversation
         .messages()
         .iter()
@@ -70,7 +80,7 @@ fn position(conversation: &Conversation, text: &str) -> usize {
         .unwrap_or_else(|| panic!("{text} is not in the conversation"))
 }
 
-fn tool_results(conversation: &Conversation) -> Vec<String> {
+pub(super) fn tool_results(conversation: &Conversation) -> Vec<String> {
     conversation
         .messages()
         .iter()
@@ -91,7 +101,7 @@ fn tool_results(conversation: &Conversation) -> Vec<String> {
         .collect()
 }
 
-async fn wait_until<F, Fut>(condition: F)
+pub(super) async fn wait_until<F, Fut>(condition: F)
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -105,7 +115,7 @@ where
     .expect("timed out waiting for the condition");
 }
 
-async fn record_runs(
+pub(super) async fn record_runs(
     events: &mut crate::agents::subagent_events::SubagentEvents,
     seen: &mut Vec<Arc<SubagentLiveEvent>>,
     count: usize,
@@ -117,7 +127,7 @@ async fn record_runs(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_user_steer_wakes_the_parent_with_fewer_tools_while_its_subagent_runs() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand this off")
         .call("delegate", delegate("task alpha"));
@@ -197,7 +207,7 @@ async fn a_user_steer_wakes_the_parent_with_fewer_tools_while_its_subagent_runs(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_parent_steers_one_subagent_and_wraps_up_another() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand off two").calls([
         ("delegate-alpha", "delegate", delegate("task alpha")),
@@ -292,7 +302,7 @@ async fn the_parent_steers_one_subagent_and_wraps_up_another() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_subagents_ask_the_parent_at_once_and_each_gets_its_answer() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand off two").calls([
         ("delegate-alpha", "delegate", delegate("task alpha")),
@@ -383,7 +393,7 @@ async fn two_subagents_ask_the_parent_at_once_and_each_gets_its_answer() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_question_is_withdrawn_when_its_subagent_or_the_parent_stops() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand off two").calls([
         ("delegate-alpha", "delegate", delegate("task alpha")),
@@ -435,7 +445,7 @@ async fn a_question_is_withdrawn_when_its_subagent_or_the_parent_stops() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_parent_reads_what_the_user_told_its_subagent_without_being_woken() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand this off")
         .call("delegate", delegate("task gamma"));
@@ -487,7 +497,7 @@ async fn the_parent_reads_what_the_user_told_its_subagent_without_being_woken() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_subagent_continues_on_a_newly_chosen_model() -> Result<()> {
     let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
-    let _guard = openai_env_for(&api);
+    let _guard = coordination_env_for(&api);
     enable_summon(&services, &session_id).await?;
     api.on("hand this off")
         .call("delegate", delegate("task gamma"));

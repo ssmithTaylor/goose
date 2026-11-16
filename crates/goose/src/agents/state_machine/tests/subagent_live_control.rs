@@ -181,6 +181,8 @@ async fn stopping_one_subagent_leaves_its_sibling_and_the_parent_running() -> Re
     api.on("task beta")
         .call(FINAL_OUTPUT_TOOL_NAME, json!({ "summary": "beta done" }))
         .delayed(Duration::from_secs(3));
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagents");
     api.on("beta done").reply("the parent carried on");
 
     let mut events = services.subagent_events.subscribe(&session_id);
@@ -256,6 +258,8 @@ async fn cancelling_the_parent_stops_every_subagent() -> Result<()> {
     api.on("task beta")
         .reply("beta is still thinking")
         .delayed(UNANSWERED);
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagents");
 
     let mut events = services.subagent_events.subscribe(&session_id);
     let cancel = CancellationToken::new();
@@ -290,6 +294,8 @@ async fn a_steer_reaches_the_running_subagent_and_shows_in_its_transcript() -> R
     api.on("hand this off")
         .call("delegate", delegate("task gamma"));
     let gamma = api.on("task gamma").hold_reply("gamma is reading");
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagents");
     api.on(FINAL_OUTPUT_CONTINUATION_MESSAGE)
         .call(FINAL_OUTPUT_TOOL_NAME, json!({ "summary": "gamma draft" }));
     api.on("also check the docs")
@@ -357,6 +363,8 @@ async fn a_failed_subagent_is_unregistered_and_reported() -> Result<()> {
     api.on("hand this off")
         .call("delegate", delegate("task delta"));
     api.on("task delta").http_error(400);
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on("failed").reply("the parent saw the failure");
 
     let mut events = services.subagent_events.subscribe(&session_id);
@@ -389,6 +397,8 @@ async fn dropping_the_parent_turn_unregisters_and_reports_its_subagent() -> Resu
     api.on("hand this off")
         .call("delegate", delegate("task epsilon"));
     let epsilon = api.on("task epsilon").hold_reply("epsilon is reading");
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagents");
 
     let mut events = services.subagent_events.subscribe(&session_id);
     let reply = reply_task(
