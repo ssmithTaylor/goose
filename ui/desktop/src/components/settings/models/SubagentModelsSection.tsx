@@ -1,6 +1,7 @@
 import { defineMessages, useIntl } from '../../../i18n';
 import type { View } from '../../../utils/navigationUtils';
 import SubagentDefaultModelCard from './SubagentDefaultModelCard';
+import SubagentRoutingCard from './SubagentRoutingCard';
 
 const i18n = defineMessages({
   title: {
@@ -22,6 +23,7 @@ export default function SubagentModelsSection({ setView }: { setView: (view: Vie
         {intl.formatMessage(i18n.title)}
       </h2>
       <SubagentDefaultModelCard setView={setView} />
+      <SubagentRoutingCard setView={setView} />
     </section>
   );
 }

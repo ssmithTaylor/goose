@@ -99,6 +99,9 @@ describe('SubagentModelsSection', () => {
       read: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
       remove: vi.fn(),
+      extensionsList: [],
+      getExtensions: vi.fn().mockResolvedValue([]),
+      getProviders: vi.fn().mockResolvedValue([]),
     } as unknown as ReturnType<typeof useConfig>);
   });
 
@@ -107,6 +110,7 @@ describe('SubagentModelsSection', () => {
 
     const section = screen.getByRole('region', { name: 'Subagent models' });
     expect(within(section).getByTestId('subagent-default-model')).toBeInTheDocument();
+    expect(within(section).getByTestId('subagent-routing')).toBeInTheDocument();
     expect(
       await within(section).findByRole('heading', { name: 'Same as main chat' })
     ).toBeInTheDocument();
