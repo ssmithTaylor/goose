@@ -1723,6 +1723,8 @@ async fn a_subagent_that_ran_out_of_turns_finishes_after_resume() -> Result<()> 
     );
     api.on("count the files")
         .call("shell", json!({ "command": "echo partial-progress" }));
+    api.on("Delegated to subagent")
+        .reply("waiting for my subagent");
     api.on(MAX_TURNS_MESSAGE)
         .reply("the subagent ran out of turns");
 
@@ -1731,9 +1733,10 @@ async fn a_subagent_that_ran_out_of_turns_finishes_after_resume() -> Result<()> 
     assert!(parent_texts(&services, &session_id)
         .await?
         .iter()
-        .any(|text| text.starts_with(&format!(
-            "Subagent {subagent_id} failed: {MAX_TURNS_MESSAGE}"
-        ))));
+        .any(
+            |text| text.starts_with(&format!("Subagent {subagent_id} failed on "))
+                && text.contains(&format!("Why it stopped:\n{MAX_TURNS_MESSAGE}"))
+        ));
 
     let resumed_request =
         resume_until_completed(&services, &api, &session_id, &subagent_id).await?;

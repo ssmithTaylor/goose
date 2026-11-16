@@ -397,7 +397,9 @@ async fn assert_turn_stopped_its_subagent(
     let last = conversation.last().expect("the turn left messages");
     let text = last.as_concat_text();
     assert!(
-        text.starts_with("Subagent ") && text.ends_with(" was cancelled before it finished."),
+        text.starts_with("Subagent ")
+            && text.contains(" was cancelled before it finished.\n")
+            && text.ends_with("No other subagents are running."),
         "unexpected last message {text:?}"
     );
     assert!(last.is_agent_visible() && !last.is_user_visible());

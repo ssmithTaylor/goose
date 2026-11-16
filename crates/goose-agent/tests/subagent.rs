@@ -855,3 +855,33 @@ async fn without_a_working_parent_results_arrive_whenever_they_can() {
         ["Subagent a completed: done"]
     );
 }
+
+#[tokio::test]
+async fn stopping_reports_finished_and_cancelled_subagents_in_the_same_batched_form() {
+    let runner = Arc::new(FakeRunner::batching());
+    let a = runner.running("a");
+    let b = runner.running("b");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let messages = vec![start(&["a", "b"])];
+    assert!(without_waiting(&operation, &messages).is_empty());
+    a.finish(SubagentOutcome::Failed("out of turns".into()));
+
+    let stopped = stop(&operation, &messages).await;
+    assert_eq!(
+        texts(&stopped),
+        [r#"results [a: Failed("out of turns"), b: Cancelled] still running []"#]
+    );
+    assert_eq!(
+        stopped[0]
+            .metadata
+            .operation_note("foreground_subagent", "delivered"),
+        Some(&json!(["a"]))
+    );
+    assert_eq!(
+        stopped[0]
+            .metadata
+            .operation_note("foreground_subagent", "cancelled"),
+        Some(&json!(["b"]))
+    );
+    assert!(b.is_closed());
+}

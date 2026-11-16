@@ -318,6 +318,7 @@ where
         let pending = self.pending_subagents(session, conversation);
         let mut effects = Vec::new();
         let mut delivered = HashSet::new();
+        let mut reported = Vec::new();
         let finished = finished.into_iter().chain(std::iter::from_fn(|| loop {
             match subagent_runs.next().now_or_never().flatten()? {
                 (subagent_session_id, SubagentUpdate::Finished(outcome)) => {
@@ -332,8 +333,9 @@ where
             }
             let remaining = pending.len().saturating_sub(delivered.len() + 1);
             if let Some(effect) = self.deliver(&subagent_session_id, &outcome, remaining, emit) {
-                delivered.insert(subagent_session_id);
+                delivered.insert(subagent_session_id.clone());
                 effects.push(effect);
+                reported.push((subagent_session_id, outcome));
             }
         }
         drop(subagent_runs);
@@ -342,6 +344,17 @@ where
             .into_iter()
             .filter(|subagent_session_id| !delivered.contains(subagent_session_id))
             .collect();
+        if self.wake.is_some() {
+            let outcomes: Vec<(String, SubagentOutcome)> = reported
+                .into_iter()
+                .chain(cancelled.iter().map(|subagent_session_id| {
+                    (subagent_session_id.clone(), SubagentOutcome::Cancelled)
+                }))
+                .collect();
+            if let Some(message) = self.batched_message(session, &outcomes, &[]).await {
+                return vec![E::from(message)];
+            }
+        }
         effects.extend(subagent_cancelled_message(&cancelled).map(E::from));
         effects
     }
@@ -440,19 +453,35 @@ where
                 emit,
             );
         }
-        let Some(mut message) = self
-            .runner
-            .results_message(session, &outcomes, &still_running)
+        match self
+            .batched_message(session, &outcomes, &still_running)
             .await
-        else {
-            return outcomes
+        {
+            Some(message) => vec![E::from(message)],
+            None => outcomes
                 .iter()
                 .filter_map(|(subagent_session_id, outcome)| {
                     subagent_result_message(subagent_session_id, outcome)
                 })
                 .map(E::from)
-                .collect();
-        };
+                .collect(),
+        }
+    }
+
+    /// The runner's one message for `outcomes`, noting which subagents it reports.
+    async fn batched_message(
+        &self,
+        session: &S,
+        outcomes: &[(String, SubagentOutcome)],
+        still_running: &[String],
+    ) -> Option<Message> {
+        if outcomes.is_empty() {
+            return None;
+        }
+        let mut message = self
+            .runner
+            .results_message(session, outcomes, still_running)
+            .await?;
         let (cancelled, delivered): (Vec<_>, Vec<_>) = outcomes
             .iter()
             .partition(|(_, outcome)| *outcome == SubagentOutcome::Cancelled);
@@ -469,7 +498,7 @@ where
                 .metadata
                 .set_operation_note(OPERATION_NAME, CANCELLED, ids(cancelled));
         }
-        vec![E::from(message)]
+        Some(message)
     }
 
     /// Waits on the subagents, leaving this step to deliver a result, add queued messages, let
