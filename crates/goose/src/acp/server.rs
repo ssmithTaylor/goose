@@ -2400,7 +2400,7 @@ impl AcpConnection {
     }
 
     fn subagent_model_meta(run_id: Option<&str>, model: &SubagentModel) -> Meta {
-        let mut meta = Self::active_run_meta(run_id);
+        let mut meta = active_run_meta(run_id);
         if let Some(serde_json::Value::Object(goose)) = meta.get_mut("goose") {
             for (key, value) in [("provider", &model.provider), ("model", &model.model)] {
                 if let Some(value) = value {
