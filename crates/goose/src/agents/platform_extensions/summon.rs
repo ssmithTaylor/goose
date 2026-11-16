@@ -3,6 +3,9 @@ use crate::agents::final_output_tool::{FinalOutputTool, FINAL_OUTPUT_TOOL_NAME};
 use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::state_machine::DELEGATED_META_KEY;
 use crate::agents::subagent_coordination::{ASK_PARENT_TOOL_NAME, STEER_SUBAGENT_TOOL_NAME};
+use crate::agents::subagent_routing::{
+    Route, RoutedModel, RoutingTable, SubagentRoutingState, Tier,
+};
 use crate::agents::tool_execution::ToolCallContext;
 use crate::agents::StateMachineServices;
 use crate::config::paths::Paths;
@@ -58,6 +61,9 @@ pub struct DelegateParams {
     pub context: Option<String>,
     pub working_dir: Option<String>,
     pub resume: Option<String>,
+    pub capability: Option<String>,
+    pub tier: Option<Tier>,
+    pub routing_reason: Option<String>,
 }
 
 const DEFAULT_RESUME_INSTRUCTIONS: &str = "Continue the task from where you left off.";
@@ -92,6 +98,20 @@ struct SubagentConfig {
     extensions: Vec<crate::config::ExtensionConfig>,
     working_dir: PathBuf,
     max_turns: usize,
+    route: Option<Route>,
+    routing_state: Option<SubagentRoutingState>,
+    routing_notes: Vec<String>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TableChoice<'a> {
+    configured: bool,
+    model: Option<&'a RoutedModel>,
+}
+
+struct ModelLayer {
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 fn merge_subrecipe_parameters(
@@ -499,8 +519,8 @@ impl SummonClient {
         )
     }
 
-    fn create_delegate_tool(&self) -> Tool {
-        let schema = serde_json::json!({
+    fn create_delegate_tool(&self, routing: Option<&RoutingTable>) -> Tool {
+        let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "instructions": {
@@ -552,9 +572,7 @@ impl SummonClient {
                 }
             }
         });
-
-        Tool::new(
-            "delegate",
+        let mut description = String::from(
             "Delegate a task to a subagent that runs independently with its own context.\n\n\
              Modes:\n\
              1. Ad-hoc: Provide `instructions` for a custom task\n\
@@ -566,10 +584,27 @@ impl SummonClient {
              - Delegates cannot coordinate. Same-file work = conflicts.\n\
              - You get a delegate's result back once it finishes. While it runs you can message it with steer_subagent.\n\n\
              Research (read-only): delegates explore and report back.\n\
-             Work (writes): partition files strictly - no two delegates touch the same file."
-                .to_string(),
-            schema.as_object().unwrap().clone(),
-        )
+             Work (writes): partition files strictly - no two delegates touch the same file.",
+        );
+        if let Some(routing) = routing {
+            schema["properties"]["capability"] = serde_json::json!({
+                "type": "string",
+                "enum": routing.capability_names(),
+                "description": "Kind of work, from the routing table. Picks the subagent's model with `tier`."
+            });
+            schema["properties"]["tier"] = serde_json::json!({
+                "type": "string",
+                "enum": Tier::ALL.map(Tier::as_str),
+                "description": "How demanding the task is. Defaults to balanced."
+            });
+            schema["properties"]["routing_reason"] = serde_json::json!({
+                "type": "string",
+                "description": "One short sentence on why this capability and tier fit the task."
+            });
+            description.push_str(&routing.describe());
+        }
+
+        Tool::new("delegate", description, schema.as_object().unwrap().clone())
     }
 
     fn create_steer_subagent_tool(&self) -> Tool {
@@ -1157,6 +1192,16 @@ impl SummonClient {
                 )
             })?;
 
+        if let Some(extra) = subagent_config
+            .route
+            .as_ref()
+            .and_then(|route| route.capability.instructions.as_ref())
+        {
+            recipe.instructions = Some(match recipe.instructions.take() {
+                Some(existing) if !existing.is_empty() => format!("{existing}\n\n{extra}"),
+                _ => extra.clone(),
+            });
+        }
         let max_turns = subagent_config.max_turns;
         recipe
             .settings
@@ -1188,6 +1233,11 @@ impl SummonClient {
         EnabledExtensionsState::new(subagent_config.extensions)
             .to_extension_data(&mut extension_data)
             .map_err(|e| format!("Failed to save delegate extensions: {e}"))?;
+        if let Some(state) = &subagent_config.routing_state {
+            state
+                .to_extension_data(&mut extension_data)
+                .map_err(|e| format!("Failed to save delegate routing: {e}"))?;
+        }
 
         let child = self
             .create_subagent_session(
@@ -1220,10 +1270,12 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to save delegate task: {e}"))?;
 
-        Ok(delegated_result(
-            format!("Delegated to subagent {}", child.id),
-            &child.id,
-        ))
+        let mut text = format!("Delegated to subagent {}", child.id);
+        for note in &subagent_config.routing_notes {
+            text.push('\n');
+            text.push_str(note);
+        }
+        Ok(delegated_result(text, &child.id))
     }
 
     fn validate_resume_params(&self, params: &DelegateParams) -> Result<(), String> {
@@ -1237,6 +1289,9 @@ impl SummonClient {
             ("context", params.context.is_some()),
             ("working_dir", params.working_dir.is_some()),
             ("max_turns", params.max_turns.is_some()),
+            ("capability", params.capability.is_some()),
+            ("tier", params.tier.is_some()),
+            ("routing_reason", params.routing_reason.is_some()),
         ]
         .into_iter()
         .filter_map(|(name, set)| set.then_some(name))
@@ -1463,6 +1518,32 @@ impl SummonClient {
             )),
         );
 
+        let (table, _) = RoutingTable::load(Config::global());
+        let route = match &table {
+            Some(table) => table
+                .route(params.capability.as_deref(), params.tier)
+                .map_err(|e| anyhow::anyhow!(e))?,
+            None => None,
+        };
+        let recipe_settings = recipe.settings.as_ref();
+        let pinned = params.provider.is_some()
+            || params.model.is_some()
+            || recipe_settings
+                .is_some_and(|s| s.goose_provider.is_some() || s.goose_model.is_some());
+        let choice = route
+            .as_ref()
+            .filter(|_| !pinned)
+            .and_then(|route| route.choice.as_ref());
+        let mut routing_notes = if pinned {
+            Vec::new()
+        } else {
+            route
+                .as_ref()
+                .map(|route| route.notes.clone())
+                .unwrap_or_default()
+        };
+        let inherited = route.as_ref().map(|_| extensions.clone());
+
         if let Some(filter) = &params.extensions {
             if filter.is_empty() {
                 extensions = Vec::new();
@@ -1484,9 +1565,50 @@ impl SummonClient {
             }
         }
 
+        if let (Some(route), Some(inherited)) = (&route, inherited) {
+            for name in &route.capability.extensions {
+                if extensions.iter().any(|ext| ext.name() == *name) {
+                    continue;
+                }
+                match inherited
+                    .iter()
+                    .find(|ext| ext.name() == *name)
+                    .cloned()
+                    .or_else(|| crate::config::get_extension_by_name(name))
+                    .filter(crate::config::extensions::is_extension_available)
+                {
+                    Some(extension) => extensions.push(extension),
+                    None => routing_notes.push(format!(
+                        "Routing: extension '{name}' for capability '{}' is not configured.",
+                        route.capability.name
+                    )),
+                }
+            }
+        }
+
+        let table_choice = TableChoice {
+            configured: table.is_some(),
+            model: choice.map(|choice| &choice.model),
+        };
         let (provider_name, model_config) = self
-            .resolve_provider_config(params, recipe, session)
+            .resolve_provider_config(params, recipe, session, table_choice)
             .await?;
+        let routing_state = route.as_ref().zip(choice).and_then(|(route, choice)| {
+            (provider_name == choice.model.provider
+                && model_config.model_name == choice.model.model)
+                .then(|| SubagentRoutingState {
+                    capability: route.capability.name.clone(),
+                    tier: choice.tier,
+                    reason: params
+                        .routing_reason
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(str::to_string),
+                    provider: choice.model.provider.clone(),
+                    model: choice.model.model.clone(),
+                })
+        });
 
         let max_turns = Self::resolve_max_turns(params, recipe, Config::global());
 
@@ -1509,7 +1631,71 @@ impl SummonClient {
             extensions,
             working_dir: effective_working_dir,
             max_turns,
+            route,
+            routing_state,
+            routing_notes,
         })
+    }
+
+    /// Provider and model sources, highest precedence first. Without a routing table this is
+    /// the upstream order; with one, explicit delegate arguments lead and the table's choice
+    /// sits between the recipe and the `GOOSE_SUBAGENT_*` defaults.
+    fn model_layers(
+        params: &DelegateParams,
+        recipe: &Recipe,
+        session: &crate::session::Session,
+        table: TableChoice<'_>,
+    ) -> Vec<ModelLayer> {
+        let recipe_settings = recipe.settings.as_ref();
+        let configured = Config::global().all_values().ok();
+        let configured_value = |key: &str| {
+            configured
+                .as_ref()
+                .and_then(|values| values.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let recipe_layer = ModelLayer {
+            provider: recipe_settings.and_then(|s| s.goose_provider.clone()),
+            model: recipe_settings.and_then(|s| s.goose_model.clone()),
+        };
+        let env_layer = ModelLayer {
+            provider: std::env::var("GOOSE_SUBAGENT_PROVIDER").ok(),
+            model: std::env::var("GOOSE_SUBAGENT_MODEL").ok(),
+        };
+        let params_layer = ModelLayer {
+            provider: params.provider.clone(),
+            model: params.model.clone(),
+        };
+        let config_layer = ModelLayer {
+            provider: configured_value("GOOSE_SUBAGENT_PROVIDER"),
+            model: configured_value("GOOSE_SUBAGENT_MODEL"),
+        };
+        let parent_layer = ModelLayer {
+            provider: session.provider_name.clone(),
+            model: session
+                .model_config
+                .as_ref()
+                .map(|config| config.model_name.clone()),
+        };
+        if !table.configured {
+            return vec![
+                recipe_layer,
+                env_layer,
+                params_layer,
+                config_layer,
+                parent_layer,
+            ];
+        }
+        let routed_layer = table.model.map(|routed| ModelLayer {
+            provider: Some(routed.provider.clone()),
+            model: Some(routed.model.clone()),
+        });
+        [params_layer, recipe_layer]
+            .into_iter()
+            .chain(routed_layer)
+            .chain([env_layer, config_layer, parent_layer])
+            .collect()
     }
 
     fn resolve_model_config(
@@ -1517,53 +1703,16 @@ impl SummonClient {
         params: &DelegateParams,
         recipe: &Recipe,
         session: &crate::session::Session,
+        table: TableChoice<'_>,
         provider_name: &str,
         provider_default_model: Option<&str>,
     ) -> Result<goose_providers::model::ModelConfig, anyhow::Error> {
-        let env_model = std::env::var("GOOSE_SUBAGENT_MODEL").ok();
-        let env_provider = std::env::var("GOOSE_SUBAGENT_PROVIDER").ok();
-        let recipe_settings = recipe.settings.as_ref();
-        let configured = Config::global().all_values().ok();
-        let configured_provider = configured
-            .as_ref()
-            .and_then(|values| values.get("GOOSE_SUBAGENT_PROVIDER"))
-            .and_then(serde_json::Value::as_str);
-        let configured_model = configured
-            .as_ref()
-            .and_then(|values| values.get("GOOSE_SUBAGENT_MODEL"))
-            .and_then(serde_json::Value::as_str);
         let matches_provider =
             |candidate: Option<&str>| candidate.is_none() || candidate == Some(provider_name);
-        let model = recipe_settings
-            .and_then(|settings| settings.goose_model.clone())
-            .filter(|_| {
-                matches_provider(
-                    recipe_settings.and_then(|settings| settings.goose_provider.as_deref()),
-                )
-            })
-            .or_else(|| {
-                env_model
-                    .clone()
-                    .filter(|_| matches_provider(env_provider.as_deref()))
-            })
-            .or_else(|| {
-                params
-                    .model
-                    .clone()
-                    .filter(|_| matches_provider(params.provider.as_deref()))
-            })
-            .or_else(|| {
-                configured_model
-                    .filter(|_| matches_provider(configured_provider))
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                session
-                    .model_config
-                    .as_ref()
-                    .filter(|_| matches_provider(session.provider_name.as_deref()))
-                    .map(|config| config.model_name.clone())
-            })
+        let model = Self::model_layers(params, recipe, session, table)
+            .into_iter()
+            .find(|layer| layer.model.is_some() && matches_provider(layer.provider.as_deref()))
+            .and_then(|layer| layer.model)
             .or_else(|| {
                 provider_default_model
                     .filter(|model| !model.is_empty())
@@ -1611,20 +1760,11 @@ impl SummonClient {
         params: &DelegateParams,
         recipe: &Recipe,
         session: &crate::session::Session,
+        table: TableChoice<'_>,
     ) -> Result<(String, goose_providers::model::ModelConfig)> {
-        let env_provider = std::env::var("GOOSE_SUBAGENT_PROVIDER").ok();
-        let provider_name = recipe
-            .settings
-            .as_ref()
-            .and_then(|s| s.goose_provider.clone())
-            .or_else(|| env_provider.clone())
-            .or_else(|| params.provider.clone())
-            .or_else(|| {
-                Config::global()
-                    .get_param::<String>("GOOSE_SUBAGENT_PROVIDER")
-                    .ok()
-            })
-            .or_else(|| session.provider_name.clone())
+        let provider_name = Self::model_layers(params, recipe, session, table)
+            .into_iter()
+            .find_map(|layer| layer.provider)
             .ok_or_else(|| anyhow::anyhow!("No provider configured"))?;
 
         let provider_entry = providers::get_from_registry(&provider_name).await;
@@ -1636,6 +1776,7 @@ impl SummonClient {
             params,
             recipe,
             session,
+            table,
             &provider_name,
             provider_default_model,
         )?;
@@ -1672,7 +1813,8 @@ impl McpClientTrait for SummonClient {
         if is_subagent {
             tools.push(self.create_ask_parent_tool());
         } else {
-            tools.push(self.create_delegate_tool());
+            let (routing, _) = RoutingTable::load(Config::global());
+            tools.push(self.create_delegate_tool(routing.as_ref()));
             tools.push(self.create_steer_subagent_tool());
         }
 
@@ -2899,6 +3041,7 @@ You review code."#;
                 &params,
                 &empty_recipe(),
                 &session_with(parent),
+                TableChoice::default(),
                 PROVIDER,
                 None,
             )
@@ -3029,6 +3172,7 @@ You review code."#;
                 &params,
                 &empty_recipe(),
                 &session_with(parent_config()),
+                TableChoice::default(),
                 PROVIDER,
                 None,
             )
@@ -3061,6 +3205,7 @@ You review code."#;
                 &DelegateParams::default(),
                 &recipe,
                 &session_with(parent_config()),
+                TableChoice::default(),
                 PROVIDER,
                 None,
             )
@@ -3095,6 +3240,7 @@ You review code."#;
                 &DelegateParams::default(),
                 &recipe,
                 &session_with(parent_config()),
+                TableChoice::default(),
             )
             .await
             .expect("resolve_provider_config");
@@ -3125,7 +3271,12 @@ You review code."#;
         });
         let session = crate::session::Session::default();
         let (_, result) = client
-            .resolve_provider_config(&DelegateParams::default(), &recipe, &session)
+            .resolve_provider_config(
+                &DelegateParams::default(),
+                &recipe,
+                &session,
+                TableChoice::default(),
+            )
             .await
             .expect("resolve_provider_config");
 
@@ -3156,7 +3307,7 @@ You review code."#;
             .clone();
         let session = crate::session::Session::default();
         let (_, result) = client
-            .resolve_provider_config(&params, &empty_recipe(), &session)
+            .resolve_provider_config(&params, &empty_recipe(), &session, TableChoice::default())
             .await
             .expect("resolve_provider_config");
 
@@ -3181,7 +3332,12 @@ You review code."#;
             ..Default::default()
         };
         let (_, result) = client
-            .resolve_provider_config(&params, &empty_recipe(), &session_with(parent_config()))
+            .resolve_provider_config(
+                &params,
+                &empty_recipe(),
+                &session_with(parent_config()),
+                TableChoice::default(),
+            )
             .await
             .expect("resolve_provider_config");
 
@@ -3223,6 +3379,7 @@ You review code."#;
                 &params,
                 &empty_recipe(),
                 &session,
+                TableChoice::default(),
                 "lmstudio",
                 Some(&default_model),
             )
@@ -3231,5 +3388,288 @@ You review code."#;
         assert!(error
             .to_string()
             .contains("No model configured for provider 'lmstudio'"));
+    }
+
+    const ROUTING_TABLE: &str = r#"{
+        "default_capability": "general",
+        "capabilities": {
+            "general": {
+                "description": "Everyday tasks",
+                "tiers": {"balanced": {"provider": "openai", "model": "gpt-4o-mini"}}
+            },
+            "images": {
+                "description": "Creating or editing images",
+                "requires": ["vision"],
+                "extensions": ["todo"],
+                "instructions": "Use the image tools; return file paths.",
+                "tiers": {
+                    "balanced": {"provider": "openai", "model": "gpt-4"},
+                    "powerful": {"provider": "openai", "model": "gpt-4o"}
+                }
+            }
+        }
+    }"#;
+
+    #[tokio::test]
+    #[serial]
+    async fn routed_precedence_is_explicit_then_recipe_then_table_then_env_then_parent() {
+        let env = env_lock::lock_env([
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_SUBAGENT_PROVIDER", None::<&str>),
+            ("GOOSE_SUBAGENT_MODEL", Some("env-model")),
+        ]);
+        let client = SummonClient::new(create_test_context()).unwrap();
+        let routed = RoutedModel {
+            provider: PROVIDER.to_string(),
+            model: "routed-model".to_string(),
+        };
+        let explicit = DelegateParams {
+            model: Some("explicit-model".to_string()),
+            ..Default::default()
+        };
+        let mut recipe = empty_recipe();
+        recipe.settings = Some(Settings {
+            goose_provider: None,
+            goose_model: Some("recipe-model".to_string()),
+            temperature: None,
+            max_turns: None,
+        });
+        let table = TableChoice {
+            configured: true,
+            model: Some(&routed),
+        };
+        let unrouted = TableChoice {
+            configured: true,
+            model: None,
+        };
+        let parent = session_with(parent_config());
+        let resolve = |params: &DelegateParams, recipe: &Recipe, table| {
+            client
+                .resolve_model_config(params, recipe, &parent, table, PROVIDER, None)
+                .unwrap()
+                .model_name
+        };
+        let none = DelegateParams::default();
+        let empty = empty_recipe();
+        assert_eq!(resolve(&explicit, &recipe, table), "explicit-model");
+        assert_eq!(resolve(&none, &recipe, table), "recipe-model");
+        assert_eq!(resolve(&none, &empty, table), "routed-model");
+        assert_eq!(resolve(&none, &empty, unrouted), "env-model");
+        assert_eq!(
+            resolve(&explicit, &recipe, TableChoice::default()),
+            "recipe-model",
+            "without a routing table the upstream order applies"
+        );
+        drop(env);
+        let _env = env_lock::lock_env([
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_SUBAGENT_PROVIDER", None::<&str>),
+            ("GOOSE_SUBAGENT_MODEL", None::<&str>),
+        ]);
+        assert_eq!(resolve(&none, &empty, unrouted), PARENT_MODEL);
+    }
+
+    fn delegate_args(value: serde_json::Value) -> JsonObject {
+        value.as_object().unwrap().clone()
+    }
+
+    fn delegated_child_id(result: &CallToolResult) -> String {
+        result.meta.as_ref().unwrap().0["subagent_session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegate_routes_by_capability_and_tier() -> Result<()> {
+        let _env = env_lock::lock_env([
+            ("GOOSE_SUBAGENT_ROUTING", Some(ROUTING_TABLE)),
+            ("GOOSE_SUBAGENT_PROVIDER", None),
+            ("GOOSE_SUBAGENT_MODEL", None),
+        ]);
+        let temp_dir = TempDir::new()?;
+        let manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let parent = manager
+            .create_session(
+                temp_dir.path().to_path_buf(),
+                "Parent".to_string(),
+                SessionType::User,
+                GooseMode::Auto,
+            )
+            .await?;
+        let mut extension_data = ExtensionData::default();
+        EnabledExtensionsState::new(
+            Recipe::from_content(
+                "title: P\ndescription: P\nprompt: Run\nextensions:\n  - type: platform\n    name: summon\n",
+            )?
+            .extensions
+            .unwrap(),
+        )
+        .to_extension_data(&mut extension_data)?;
+        manager
+            .update(&parent.id)
+            .provider_name("anthropic")
+            .model_config(goose_providers::model::ModelConfig::new(PARENT_MODEL))
+            .extension_data(extension_data)
+            .apply()
+            .await?;
+        let client = SummonClient::new(create_test_context_with_session_manager(manager.clone()))?;
+        let delegate = |args| client.handle_delegate(&parent.id, temp_dir.path(), Some(args));
+
+        let routed = delegate(delegate_args(serde_json::json!({
+            "instructions": "Draw a cat",
+            "capability": "images",
+            "routing_reason": "needs image tools"
+        })))
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let text = &routed.content[0].as_text().unwrap().text;
+        assert!(
+            text.contains("skipped openai/gpt-4 for images/balanced: it lacks vision"),
+            "{text}"
+        );
+        let child = manager
+            .get_session(&delegated_child_id(&routed), false)
+            .await?;
+        assert_eq!(child.provider_name.as_deref(), Some("openai"));
+        assert_eq!(child.model_config.as_ref().unwrap().model_name, "gpt-4o");
+        let extensions: Vec<String> =
+            EnabledExtensionsState::from_extension_data(&child.extension_data)
+                .unwrap()
+                .extensions
+                .iter()
+                .map(|extension| extension.name())
+                .collect();
+        assert_eq!(extensions, ["summon", "todo"]);
+        assert_eq!(
+            child.recipe.as_ref().unwrap().instructions.as_deref(),
+            Some("Use the image tools; return file paths.")
+        );
+        assert_eq!(
+            crate::agents::subagent_handler::subagent_model(&child).routing,
+            Some(SubagentRoutingState {
+                capability: "images".to_string(),
+                tier: Tier::Powerful,
+                reason: Some("needs image tools".to_string()),
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+            })
+        );
+
+        let defaulted = delegate(delegate_args(
+            serde_json::json!({"instructions": "Summarise"}),
+        ))
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let child = manager
+            .get_session(&delegated_child_id(&defaulted), false)
+            .await?;
+        assert_eq!(
+            child.model_config.as_ref().unwrap().model_name,
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            crate::agents::subagent_handler::subagent_model(&child)
+                .routing
+                .map(|routing| (routing.capability, routing.tier)),
+            Some(("general".to_string(), Tier::Balanced))
+        );
+
+        let explicit = delegate(delegate_args(serde_json::json!({
+            "instructions": "Draw a dog",
+            "capability": "images",
+            "provider": "openai",
+            "model": "gpt-4.1"
+        })))
+        .await
+        .map_err(anyhow::Error::msg)?;
+        assert!(!explicit.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("Routing"));
+        let child = manager
+            .get_session(&delegated_child_id(&explicit), false)
+            .await?;
+        assert_eq!(child.model_config.as_ref().unwrap().model_name, "gpt-4.1");
+        assert!(SubagentRoutingState::from_extension_data(&child.extension_data).is_none());
+        assert!(
+            EnabledExtensionsState::from_extension_data(&child.extension_data)
+                .unwrap()
+                .extensions
+                .iter()
+                .any(|extension| extension.name() == "todo")
+        );
+
+        let unknown = delegate(delegate_args(serde_json::json!({
+            "instructions": "Sing",
+            "capability": "music"
+        })))
+        .await
+        .unwrap_err();
+        assert!(unknown.contains("Unknown capability 'music'"), "{unknown}");
+        Ok(())
+    }
+
+    #[test]
+    fn delegate_tool_describes_the_routing_table_only_when_configured() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+        let upstream = client.create_delegate_tool(None);
+        let properties = |tool: &Tool| {
+            let mut names: Vec<String> = tool.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            properties(&upstream),
+            [
+                "context",
+                "extensions",
+                "instructions",
+                "max_turns",
+                "model",
+                "parameters",
+                "provider",
+                "resume",
+                "source",
+                "temperature",
+                "working_dir"
+            ]
+        );
+        let upstream_description = upstream.description.as_deref().unwrap();
+        assert!(!upstream_description.contains("routing"));
+
+        let (table, warnings) = RoutingTable::parse(&serde_json::from_str(ROUTING_TABLE).unwrap());
+        assert!(warnings.is_empty());
+        let routed = client.create_delegate_tool(table.as_ref());
+        let description = routed.description.as_deref().unwrap();
+        assert!(description.starts_with(upstream_description));
+        assert!(description.contains("- images: Creating or editing images"));
+        assert!(description.contains("- general: Everyday tasks (default)"));
+        let schema = &routed.input_schema["properties"];
+        let mut names: Vec<&str> = schema["capability"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["general", "images"]);
+        assert_eq!(
+            schema["tier"]["enum"],
+            serde_json::json!(["fast", "balanced", "powerful"])
+        );
+        assert!(schema["routing_reason"].is_object());
+        assert_eq!(properties(&routed).len(), properties(&upstream).len() + 3);
     }
 }

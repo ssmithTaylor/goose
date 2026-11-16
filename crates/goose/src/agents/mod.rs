@@ -29,6 +29,7 @@ pub(crate) mod subagent_coordination;
 pub(crate) mod subagent_events;
 pub mod subagent_execution_tool;
 pub(crate) mod subagent_handler;
+pub mod subagent_routing;
 pub(crate) mod subagent_task_config;
 mod tool_confirmation_coordinator;
 pub mod tool_execution;

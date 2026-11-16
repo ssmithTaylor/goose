@@ -10,6 +10,7 @@ use super::AgentEvent;
 pub(crate) struct SubagentModel {
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub routing: Option<super::subagent_routing::SubagentRoutingState>,
 }
 
 pub(crate) enum SubagentLiveUpdate {

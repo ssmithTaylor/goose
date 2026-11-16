@@ -530,6 +530,7 @@ async fn a_running_subagent_continues_on_a_newly_chosen_model() -> Result<()> {
                 && *model == SubagentModel {
                     provider: Some("openai".to_string()),
                     model: Some("gpt-chosen-mid-run".to_string()),
+                    routing: None,
                 }
     )));
     assert_eq!(started_runs(&seen).len(), 1);
