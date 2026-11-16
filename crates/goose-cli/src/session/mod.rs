@@ -1530,7 +1530,7 @@ impl CliSession {
                                 log_tool_metrics(&message, &self.messages);
                                 self.messages.push(message.clone());
 
-                                if interactive { output::hide_thinking() };
+                                if interactive && !output::is_hidden_thinking(&message) { output::hide_thinking() };
                                 let _ = progress_bars.hide();
 
                                 if is_stream_json_mode {

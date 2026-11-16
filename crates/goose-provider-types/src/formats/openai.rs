@@ -1433,12 +1433,25 @@ where
                                     if let Some(details) = &tool_chunk.choices[0].delta.reasoning_details {
                                         accumulated_reasoning.extend(details.iter().cloned());
                                     }
-                                    if let Some(rc) = tool_chunk.choices[0].delta.reasoning_text() {
-                                        accumulated_reasoning_content.push_str(rc);
-                                        if !rc.is_empty() {
-                                            saw_structured_reasoning = true;
-                                            pending_inline_thinking.clear();
+                                    if let Some(rc) = tool_chunk.choices[0].delta.reasoning_text().filter(|rc| !rc.is_empty()) {
+                                        saw_structured_reasoning = true;
+                                        pending_inline_thinking.clear();
+                                        let mut reasoning = accumulated_reasoning_content
+                                            .get(yielded_reasoning_content_len..)
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        reasoning.push_str(rc);
+                                        accumulated_reasoning_content.clear();
+                                        yielded_reasoning_content_len = 0;
+                                        let mut msg = Message::new(
+                                            Role::Assistant,
+                                            chrono::Utc::now().timestamp(),
+                                            vec![MessageContentBlock::thinking(reasoning, "")],
+                                        );
+                                        if let Some(id) = chunk.id.clone() {
+                                            msg = msg.with_id(id);
                                         }
+                                        yield (Some(msg), None);
                                     }
                                     if let Some(delta_tool_calls) = &tool_chunk.choices[0].delta.tool_calls {
                                         for delta_call in delta_tool_calls {
@@ -5445,6 +5458,50 @@ data: [DONE]"#;
 
         assert_eq!(thinking, "tool thought");
         assert_eq!(tool_calls, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_reasoning_during_tool_call_is_yielded_live() -> anyhow::Result<()> {
+        let (tx, rx) = futures::channel::mpsc::unbounded::<anyhow::Result<String>>();
+        let mut messages = Box::pin(response_to_streaming_message(rx));
+        let send = |line: &str| tx.unbounded_send(Ok(line.to_string())).unwrap();
+
+        send("data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan \",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"test_tool\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}");
+        send("data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"more\"},\"finish_reason\":null}]}");
+        let live: Message =
+            tokio::time::timeout(std::time::Duration::from_secs(5), messages.next())
+                .await
+                .expect("reasoning must not wait for the tool call to finish")
+                .unwrap()?
+                .0
+                .unwrap();
+        assert_eq!(live.id.as_deref(), Some("x"));
+        assert_eq!(
+            live.content[0].as_thinking().map(|t| t.thinking.as_str()),
+            Some("plan more")
+        );
+
+        send("data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}");
+        send("data: [DONE]");
+        drop(tx);
+
+        let mut stored = crate::conversation::Conversation::empty();
+        stored.push(live);
+        while let Some(result) = messages.next().await {
+            if let (Some(message), _) = result? {
+                stored.push(message);
+            }
+        }
+
+        assert_eq!(stored.len(), 1);
+        let content = &stored.messages()[0].content;
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0].as_thinking().map(|t| t.thinking.as_str()),
+            Some("plan more")
+        );
+        assert!(content[1].as_tool_request().is_some());
         Ok(())
     }
 

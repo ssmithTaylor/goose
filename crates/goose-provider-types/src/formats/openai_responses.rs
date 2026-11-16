@@ -1195,6 +1195,114 @@ fn sse_field_name(line: &str) -> Option<&str> {
     field_like.then_some(field)
 }
 
+const REASONING_SUMMARY_TEXT_DELTA: &str = "response.reasoning_summary_text.delta";
+
+struct ReasoningSummaryDelta {
+    item_id: String,
+    summary_index: i64,
+    delta: String,
+}
+
+fn reasoning_summary_delta(data_line: &str) -> Option<ReasoningSummaryDelta> {
+    if !data_line.contains(REASONING_SUMMARY_TEXT_DELTA) {
+        return None;
+    }
+    let event: Value = serde_json::from_str(data_line).ok()?;
+    if event.get("type").and_then(Value::as_str) != Some(REASONING_SUMMARY_TEXT_DELTA) {
+        return None;
+    }
+    Some(ReasoningSummaryDelta {
+        item_id: event.get("item_id")?.as_str()?.to_string(),
+        summary_index: event
+            .get("summary_index")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        delta: event.get("delta")?.as_str()?.to_string(),
+    })
+}
+
+/// Summary text streamed for one reasoning item, so the finished item only adds
+/// its encrypted content (and any text the deltas missed) instead of repeating it.
+struct StreamedReasoning {
+    item_id: String,
+    summary_index: Option<i64>,
+    text: String,
+    closed: bool,
+}
+
+impl StreamedReasoning {
+    fn new(item_id: String) -> Self {
+        Self {
+            item_id,
+            summary_index: None,
+            text: String::new(),
+            closed: false,
+        }
+    }
+
+    fn push(&mut self, summary_index: i64, delta: &str) -> Option<String> {
+        if self.closed {
+            return None;
+        }
+        // `reasoning_from_output` joins summary parts with a newline.
+        let mut chunk = String::new();
+        if self
+            .summary_index
+            .is_some_and(|index| index != summary_index)
+        {
+            chunk.push('\n');
+        }
+        self.summary_index = Some(summary_index);
+        chunk.push_str(&sanitize_unicode_tags(delta));
+        if chunk.is_empty() {
+            return None;
+        }
+        self.text.push_str(&chunk);
+        Some(chunk)
+    }
+}
+
+fn streamed_reasoning_id(item: &ResponseOutputItemInfo) -> Option<&str> {
+    match item {
+        ResponseOutputItemInfo::Reasoning { id: Some(id), .. } => Some(id),
+        _ => None,
+    }
+}
+
+fn is_streamed_reasoning(streamed: &[StreamedReasoning], item: &ResponseOutputItemInfo) -> bool {
+    streamed_reasoning_id(item).is_some_and(|id| streamed.iter().any(|r| r.item_id == id))
+}
+
+fn close_streamed_reasoning(
+    streamed: &mut [StreamedReasoning],
+    item: &ResponseOutputItemInfo,
+) -> Option<MessageContentBlock> {
+    let ResponseOutputItemInfo::Reasoning {
+        summary,
+        encrypted_content,
+        ..
+    } = item
+    else {
+        return None;
+    };
+    let id = streamed_reasoning_id(item)?;
+    let entry = streamed.iter_mut().find(|r| r.item_id == id && !r.closed)?;
+    entry.closed = true;
+    let full = reasoning_from_output(summary, encrypted_content.as_deref())?;
+    let thinking = full.as_thinking()?;
+    let missing = thinking
+        .thinking
+        .strip_prefix(&entry.text)
+        .unwrap_or_default();
+    if missing.is_empty() && thinking.signature.is_empty() {
+        return None;
+    }
+    Some(MessageContentBlock::thinking(
+        missing,
+        thinking.signature.clone(),
+    ))
+}
+
 pub fn responses_api_to_streaming_message<S>(
     mut stream: S,
 ) -> impl Stream<Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>> + 'static
@@ -1211,6 +1319,7 @@ where
         let mut output_items: Vec<ResponseOutputItemInfo> = Vec::new();
         let mut is_text_response = false;
         let mut output_token_limit_reached = false;
+        let mut streamed_reasoning: Vec<StreamedReasoning> = Vec::new();
 
         'outer: while let Some(response) = stream.next().await {
             let response_str = response?;
@@ -1242,6 +1351,28 @@ where
 
             if data_line == "[DONE]" {
                 break 'outer;
+            }
+
+            if let Some(delta) = reasoning_summary_delta(data_line) {
+                let index = match streamed_reasoning.iter().position(|r| r.item_id == delta.item_id) {
+                    Some(index) => index,
+                    None => {
+                        streamed_reasoning.push(StreamedReasoning::new(delta.item_id));
+                        streamed_reasoning.len() - 1
+                    }
+                };
+                if let Some(chunk) = streamed_reasoning[index].push(delta.summary_index, &delta.delta) {
+                    let mut msg = Message::new(
+                        Role::Assistant,
+                        chrono::Utc::now().timestamp(),
+                        vec![MessageContentBlock::thinking(chunk, "")],
+                    );
+                    if let Some(id) = &response_id {
+                        msg = msg.with_id(id.clone());
+                    }
+                    yield (Some(msg), None);
+                }
+                continue;
             }
 
             let Some(event) = parse_responses_stream_event(data_line)? else {
@@ -1278,6 +1409,17 @@ where
                 }
 
                 ResponsesStreamEvent::OutputItemDone { item, .. } => {
+                    if let Some(closing) = close_streamed_reasoning(&mut streamed_reasoning, &item) {
+                        let mut msg = Message::new(
+                            Role::Assistant,
+                            chrono::Utc::now().timestamp(),
+                            vec![closing],
+                        );
+                        if let Some(id) = &response_id {
+                            msg = msg.with_id(id.clone());
+                        }
+                        yield (Some(msg), None);
+                    }
                     output_items.push(item);
                 }
 
@@ -1399,7 +1541,21 @@ where
             ))?;
         }
 
-        // Process final output items and yield usage data
+        for item in &output_items {
+            if let Some(closing) = close_streamed_reasoning(&mut streamed_reasoning, item) {
+                let mut msg = Message::new(
+                    Role::Assistant,
+                    chrono::Utc::now().timestamp(),
+                    vec![closing],
+                );
+                if let Some(id) = &response_id {
+                    msg = msg.with_id(id.clone());
+                }
+                yield (Some(msg), None);
+            }
+        }
+        output_items.retain(|item| !is_streamed_reasoning(&streamed_reasoning, item));
+
         let content = process_streaming_output_items(output_items, is_text_response)?;
 
         if !content.is_empty() {
@@ -1910,6 +2066,81 @@ mod tests {
         assert_eq!(thinking_parts.join(""), "Let me think step by step.");
         assert!(text_parts.concat().contains("Paris."));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_responses_stream_yields_reasoning_summary_deltas_live() -> anyhow::Result<()> {
+        let reasoning_item = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [
+                { "type": "summary_text", "text": "First part." },
+                { "type": "summary_text", "text": "Second part." }
+            ],
+            "encrypted_content": "enc_1"
+        });
+        let call_item = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "status": "completed",
+            "name": "search",
+            "arguments": "{}"
+        });
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<anyhow::Result<String>>();
+        let messages = responses_api_to_streaming_message(rx);
+        futures::pin_mut!(messages);
+        let send = |line: String| tx.unbounded_send(Ok(line)).unwrap();
+
+        send(r#"data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"in_progress","model":"gpt-5","output":[]}}"#.to_string());
+        send(r#"data: {"type":"response.reasoning_summary_text.delta","sequence_number":2,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"First "}"#.to_string());
+        let live = tokio::time::timeout(std::time::Duration::from_secs(5), messages.next())
+            .await
+            .expect("summary delta must be yielded before the response completes")
+            .unwrap()?
+            .0
+            .unwrap();
+        assert_eq!(live.id.as_deref(), Some("resp_1"));
+        assert_eq!(
+            live.content[0]
+                .as_thinking()
+                .map(|t| (t.thinking.as_str(), t.signature.as_str())),
+            Some(("First ", ""))
+        );
+
+        send(r#"data: {"type":"response.reasoning_summary_text.delta","sequence_number":3,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"part."}"#.to_string());
+        send(r#"data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_1","output_index":0,"summary_index":1,"delta":"Second part."}"#.to_string());
+        send(format!(
+            r#"data: {{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{reasoning_item}}}"#
+        ));
+        send(format!(
+            r#"data: {{"type":"response.output_item.done","sequence_number":6,"output_index":1,"item":{call_item}}}"#
+        ));
+        send(format!(
+            r#"data: {{"type":"response.completed","sequence_number":7,"response":{{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-5","output":[{reasoning_item},{call_item}],"usage":{{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}}}"#
+        ));
+        drop(tx);
+
+        let mut stored = crate::conversation::Conversation::empty();
+        stored.push(live);
+        while let Some(item) = messages.next().await {
+            if let (Some(message), _) = item? {
+                stored.push(message);
+            }
+        }
+
+        assert_eq!(stored.len(), 1);
+        let content = &stored.messages()[0].content;
+        assert_eq!(content.len(), 2, "{content:?}");
+        assert_eq!(
+            content[0]
+                .as_thinking()
+                .map(|t| (t.thinking.as_str(), t.signature.as_str())),
+            Some(("First part.\nSecond part.", "enc_1"))
+        );
+        assert!(content[1].as_tool_request().is_some());
         Ok(())
     }
 

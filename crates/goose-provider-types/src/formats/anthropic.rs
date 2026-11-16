@@ -1049,11 +1049,6 @@ where
         SignatureDelta { signature: String },
     }
 
-    struct ThinkingState {
-        text: String,
-        signature: String,
-    }
-
     fn block_index(event_data: &Value) -> Option<i32> {
         event_data
             .get("index")
@@ -1072,7 +1067,7 @@ where
         let mut held = Vec::new();
         let mut final_usage: Option<ProviderUsage> = None;
         let mut message_id: Option<String> = None;
-        let mut thinking: Option<ThinkingState> = None;
+        let mut thinking_signature: Option<String> = None;
         let mut stop_reason: Option<String> = None;
         let mut message_stopped = false;
         let mut additional_data: Option<Map<String, Value>> = None;
@@ -1148,18 +1143,22 @@ where
                                 }
                             }
                             Some(THINKING_TYPE) => {
-                                thinking = Some(ThinkingState {
-                                    text: content_block
-                                        .get(THINKING_TYPE)
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    signature: content_block
+                                thinking_signature = Some(
+                                    content_block
                                         .get(SIGNATURE_FIELD)
                                         .and_then(|s| s.as_str())
                                         .unwrap_or_default()
                                         .to_string(),
-                                });
+                                );
+                                let text = content_block
+                                    .get(THINKING_TYPE)
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or_default();
+                                if !text.is_empty() {
+                                    let mut message = Message::assistant().with_thinking(text, "");
+                                    message.id = message_id.clone();
+                                    if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
+                                }
                             }
                             Some(REDACTED_THINKING_TYPE) => {
                                 if let Some(data) = content_block.get(DATA_FIELD).and_then(|d| d.as_str()) {
@@ -1192,13 +1191,15 @@ where
                                 }
                             }
                             Ok(ContentBlockDelta::ThinkingDelta { thinking: t }) => {
-                                if let Some(ref mut state) = thinking {
-                                    state.text.push_str(&t);
+                                if thinking_signature.is_some() && !t.is_empty() {
+                                    let mut message = Message::assistant().with_thinking(t, "");
+                                    message.id = message_id.clone();
+                                    if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
                                 }
                             }
                             Ok(ContentBlockDelta::SignatureDelta { signature: s }) => {
-                                if let Some(ref mut state) = thinking {
-                                    state.signature.push_str(&s);
+                                if let Some(ref mut signature) = thinking_signature {
+                                    signature.push_str(&s);
                                 }
                             }
                             Err(e) => {
@@ -1209,14 +1210,12 @@ where
                     continue;
                 }
                 EVENT_CONTENT_BLOCK_STOP => {
-                    if let Some(state) = thinking.take() {
-                        // Omitted thinking arrives as an empty string with a signature and must still be replayed.
-                        if !state.text.is_empty() || !state.signature.is_empty() {
-                            let mut message = Message::assistant()
-                                .with_thinking(state.text, state.signature);
-                            message.id = message_id.clone();
-                            if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
-                        }
+                    // The signature closes the block its unsigned deltas opened. Omitted thinking
+                    // is only this empty-text chunk and must still be replayed.
+                    if let Some(signature) = thinking_signature.take().filter(|s| !s.is_empty()) {
+                        let mut message = Message::assistant().with_thinking("", signature);
+                        message.id = message_id.clone();
+                        if held.is_empty() { yield (Some(message), None); } else { held.push(message); }
                     }
                     if let Some(index) = block_index(&event.data) {
                         if let Some(call) = accumulated_tool_calls.remove(&index) {
@@ -2598,19 +2597,17 @@ mod tests {
 
     async fn collect_stream(events: &str) -> StreamedParts {
         let mut parts = StreamedParts::default();
+        let mut stored = crate::conversation::Conversation::empty();
 
         for result in collect_stream_results(events).await {
             if let Ok((Some(msg), _usage)) = result {
                 if msg.metadata.output_token_limit_reached {
                     parts.output_token_limit_message_ids.push(msg.id.clone());
                 }
+                stored.push(msg.clone());
                 for c in &msg.content {
                     match c {
-                        MessageContentBlock::Thinking(t) => {
-                            parts
-                                .thinking
-                                .push((t.thinking.clone(), t.signature.clone()));
-                        }
+                        MessageContentBlock::Thinking(_) => {}
                         MessageContentBlock::RedactedThinking(r) => {
                             parts.redacted_thinking.push(r.data.clone());
                         }
@@ -2626,6 +2623,12 @@ mod tests {
                 }
             }
         }
+        parts.thinking = stored
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| content.as_thinking())
+            .map(|t| (t.thinking.clone(), t.signature.clone()))
+            .collect();
         parts
     }
 
@@ -2774,6 +2777,140 @@ mod tests {
         );
         assert_eq!(parts.text, vec!["Let me search for that."]);
         assert_eq!(parts.tool_calls, vec!["search"]);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_yields_thinking_deltas_before_block_stop() {
+        use futures::StreamExt;
+
+        async fn next_thinking(
+            messages: &mut (impl futures::Stream<
+                Item = anyhow::Result<(Option<Message>, Option<ProviderUsage>)>,
+            > + Unpin),
+        ) -> (String, String) {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), messages.next())
+                .await
+                .expect("thinking delta must be yielded before more input arrives")
+                .unwrap()
+                .unwrap()
+                .0
+                .unwrap();
+            assert_eq!(message.id.as_deref(), Some("msg_live"));
+            let [MessageContentBlock::Thinking(t)] = message.content.as_slice() else {
+                panic!("expected one thinking block, got {:?}", message.content);
+            };
+            (t.thinking.clone(), t.signature.clone())
+        }
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<anyhow::Result<String>>();
+        let mut messages = Box::pin(response_to_streaming_message(rx));
+        let send = |line: &str| tx.unbounded_send(Ok(line.to_string())).unwrap();
+
+        send(
+            r#"data: {"type":"message_start","message":{"id":"msg_live","role":"assistant","content":[],"model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+        );
+        send(
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        );
+        send(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First"}}"#,
+        );
+        assert_eq!(
+            next_thinking(&mut messages).await,
+            ("First".to_string(), String::new())
+        );
+
+        send(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" second"}}"#,
+        );
+        assert_eq!(
+            next_thinking(&mut messages).await,
+            (" second".to_string(), String::new())
+        );
+
+        send(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_live"}}"#,
+        );
+        send(r#"data: {"type":"content_block_stop","index":0}"#);
+        assert_eq!(
+            next_thinking(&mut messages).await,
+            (String::new(), "sig_live".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_consecutive_thinking_blocks_store_one_block_each() {
+        let events = concat!(
+            r#"data: {"type":"message_start","message":{"id":"msg_4","role":"assistant","content":[],"model":"claude-opus-4-6","usage":{"input_tokens":8,"output_tokens":0}}}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Block one "}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"text."}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_one"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig_omitted"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"Block three."}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"signature_delta","signature":"sig_three"}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":2}"#,
+            "\n",
+            r#"data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}"#,
+            "\n",
+            r#"data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Answer."}}"#,
+            "\n",
+            r#"data: {"type":"content_block_stop","index":3}"#,
+            "\n",
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}"#,
+            "\n",
+            r#"data: {"type":"message_stop"}"#,
+        );
+
+        let mut stored = crate::conversation::Conversation::empty();
+        for result in collect_stream_results(events).await {
+            if let (Some(message), _) = result.unwrap() {
+                stored.push(message);
+            }
+        }
+
+        assert_eq!(stored.len(), 1);
+        let thinking: Vec<(&str, &str)> = stored.messages()[0]
+            .content
+            .iter()
+            .filter_map(|content| content.as_thinking())
+            .map(|t| (t.thinking.as_str(), t.signature.as_str()))
+            .collect();
+        assert_eq!(
+            thinking,
+            vec![
+                ("Block one text.", "sig_one"),
+                ("", "sig_omitted"),
+                ("Block three.", "sig_three"),
+            ]
+        );
+
+        let replay = format_messages(stored.messages());
+        assert_eq!(
+            replay[0]["content"],
+            json!([
+                {"type": "thinking", "thinking": "Block one text.", "signature": "sig_one"},
+                {"type": "thinking", "thinking": "", "signature": "sig_omitted"},
+                {"type": "thinking", "thinking": "Block three.", "signature": "sig_three"},
+                {"type": "text", "text": "Answer."},
+            ])
+        );
     }
 
     async fn collect_stream_results(

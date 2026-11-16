@@ -433,7 +433,14 @@ pub fn render_message_streaming(
                 println!("Image: [data: {}, type: {}]", image.data, image.mime_type);
             }
             MessageContent::Thinking(t) => {
-                render_thinking_streaming(&t.thinking, buffer, thinking_header_shown, theme);
+                let closes_block = t.thinking.is_empty() && !t.signature.is_empty();
+                render_thinking_streaming(
+                    &t.thinking,
+                    closes_block,
+                    buffer,
+                    thinking_header_shown,
+                    theme,
+                );
             }
             MessageContent::RedactedThinking(_) => {
                 flush_markdown_buffer(buffer, theme);
@@ -570,13 +577,28 @@ fn render_thinking(text: &str, theme: Theme) {
     }
 }
 
+/// Streamed thinking arrives as many deltas for as long as the model thinks; while it
+/// is hidden it must not clear the "Thinking..." indicator, the only sign of progress.
+pub fn is_hidden_thinking(message: &Message) -> bool {
+    !should_show_thinking()
+        && !message.content.is_empty()
+        && message
+            .content
+            .iter()
+            .all(|content| matches!(content, MessageContent::Thinking(_)))
+}
+
 fn render_thinking_streaming(
     text: &str,
+    closes_block: bool,
     buffer: &mut MarkdownBuffer,
     header_shown: &mut bool,
     theme: Theme,
 ) {
-    if should_show_thinking() && !text.is_empty() {
+    if !should_show_thinking() {
+        return;
+    }
+    if !text.is_empty() {
         flush_markdown_buffer(buffer, theme);
         if !*header_shown {
             println!("\n{}", style("Thinking:").dim().italic());
@@ -584,6 +606,9 @@ fn render_thinking_streaming(
         }
         print!("{}", style(text).dim());
         let _ = std::io::stdout().flush();
+    } else if closes_block && *header_shown {
+        println!();
+        *header_shown = false;
     }
 }
 
@@ -2069,6 +2094,26 @@ mod tests {
         let config =
             Config::new_with_file_secrets(config_file.path(), secrets_file.path()).unwrap();
         (config, config_file, secrets_file)
+    }
+
+    #[test]
+    fn hidden_thinking_deltas_keep_the_thinking_indicator() {
+        let _guard = env_lock::lock_env([("GOOSE_CLI_SHOW_THINKING", None::<&str>)]);
+
+        assert!(is_hidden_thinking(
+            &Message::assistant().with_thinking("partial", "")
+        ));
+        assert!(is_hidden_thinking(
+            &Message::assistant().with_thinking("", "sig")
+        ));
+        assert!(!is_hidden_thinking(
+            &Message::assistant().with_text("answer")
+        ));
+        assert!(!is_hidden_thinking(
+            &Message::assistant()
+                .with_thinking("partial", "")
+                .with_text("answer")
+        ));
     }
 
     #[test]

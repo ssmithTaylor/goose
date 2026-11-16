@@ -44,7 +44,9 @@ pub(super) fn output_message_json(message: &Message) -> String {
 
 pub(super) fn append_message(accumulated: &mut Option<Message>, message: &Message) {
     match accumulated {
-        Some(accumulated) => accumulated.content.extend(message.content.iter().cloned()),
+        Some(accumulated) => {
+            super::reply_parts::append_streamed_chunk(accumulated, message.clone())
+        }
         None => *accumulated = Some(message.clone()),
     }
 }
