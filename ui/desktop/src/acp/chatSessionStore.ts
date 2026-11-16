@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { GooseSessionNotification_unstable } from '@aaif/goose-acp-client';
 import type { SessionNotification } from '@agentclientprotocol/sdk';
 import type { TokenState } from '../types/chat';
@@ -11,7 +11,13 @@ import {
   type AcpSessionNotificationAdapter,
 } from './sessionNotificationAdapter';
 import type { ElicitationStatus } from './adapter/elicitations';
-import { cloneMessage, getGooseParentSessionId, type SubagentOutcome } from './adapter/shared';
+import { acpPermissionMessageId } from './adapter/permissions';
+import {
+  cloneMessage,
+  getGooseParentSessionId,
+  getGooseSubagentSessionId,
+  type SubagentOutcome,
+} from './adapter/shared';
 import type { AcpElicitationRequest } from './elicitationRequests';
 import type { AcpPermissionRequest } from './permissionRequestTypes';
 
@@ -28,11 +34,21 @@ export interface AcpChatSessionSnapshot {
   pendingCancelPromptAttemptId: string | null;
   parentSessionId: string | null;
   subagentOutcome: SubagentOutcome | null;
+  providerId: string | null;
+  modelId: string | null;
+  pendingSubagentInputs: PendingSubagentInput[];
+}
+
+// A permission request or elicitation a subagent forwarded to this session;
+// messageId is the actionRequired message holding it in this session's messages.
+export interface PendingSubagentInput {
+  messageId: string;
+  subagentSessionId: string;
 }
 
 type SnapshotListener = (snapshot: AcpChatSessionSnapshot) => void;
 
-interface StoreEntry extends AcpChatSessionSnapshot {
+interface StoreEntry extends Omit<AcpChatSessionSnapshot, 'pendingSubagentInputs'> {
   adapter: AcpSessionNotificationAdapter;
   promptCancellationRestoreState: {
     activeRunId: string | null;
@@ -40,8 +56,10 @@ interface StoreEntry extends AcpChatSessionSnapshot {
     pendingUserInputRequestIds: Set<string>;
   } | null;
   pendingUserInputRequestIds: Set<string>;
+  subagentInputsByRequestId: Map<string, PendingSubagentInput>;
   pendingLocalSteerMessageIds: Set<string>;
   preConfirmedSteerMessageIds: Set<string>;
+  lastSubagentRunKey: string | null;
   // Cached result of the last notify(); reused while a session-load replay is
   // in flight so per-notification reads don't deep-clone the growing message
   // array (see applyAcpSessionNotification / getSnapshot).
@@ -59,11 +77,17 @@ const initialTokenState: TokenState = {
 
 export interface AcpChatSessionStore {
   getSnapshot(sessionId: string): AcpChatSessionSnapshot | undefined;
+  getRunningSubagentSessionIds(parentSessionId: string): string[];
 }
 
 export interface AcpChatSessionActions {
   deleteSnapshot(sessionId: string): void;
   linkSubagentSession(subagentSessionId: string, parentSessionId: string): void;
+  setSessionProviderModel(
+    sessionId: string,
+    providerId: string | null,
+    modelId: string | null
+  ): AcpChatSessionSnapshot;
 
   applyAcpSessionNotification(notification: SessionNotification): AcpChatSessionSnapshot;
   applyAcpGooseSessionNotification(
@@ -120,11 +144,13 @@ export interface AcpChatSessionActions {
 
 interface AcpChatSessionStoreInternal extends AcpChatSessionStore, AcpChatSessionActions {
   subscribe(sessionId: string, listener: (snapshot: AcpChatSessionSnapshot) => void): () => void;
+  subscribeSubagentRuns(listener: () => void): () => void;
 }
 
 function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
   const sessionsById = new Map<string, StoreEntry>();
   const listenersBySessionId = new Map<string, Set<SnapshotListener>>();
+  const subagentRunListeners = new Set<() => void>();
 
   const getSnapshot: AcpChatSessionStore['getSnapshot'] = (sessionId) => {
     const entry = sessionsById.get(sessionId);
@@ -164,8 +190,51 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     };
   };
 
+  const subscribeSubagentRuns: AcpChatSessionStoreInternal['subscribeSubagentRuns'] = (
+    listener
+  ) => {
+    subagentRunListeners.add(listener);
+    return () => {
+      subagentRunListeners.delete(listener);
+    };
+  };
+
+  const notifySubagentRunListeners = () => {
+    for (const listener of subagentRunListeners) {
+      listener();
+    }
+  };
+
+  const notifySubagentRunsIfChanged = (entry: StoreEntry) => {
+    const runKey =
+      entry.parentSessionId && entry.activeRunId
+        ? `${entry.parentSessionId}\u0000${entry.activeRunId}`
+        : null;
+    if (entry.lastSubagentRunKey === runKey) {
+      return;
+    }
+    entry.lastSubagentRunKey = runKey;
+    notifySubagentRunListeners();
+  };
+
+  const getRunningSubagentSessionIds: AcpChatSessionStore['getRunningSubagentSessionIds'] = (
+    parentSessionId
+  ) => {
+    const sessionIds: string[] = [];
+    for (const [sessionId, entry] of sessionsById) {
+      if (entry.parentSessionId === parentSessionId && entry.activeRunId !== null) {
+        sessionIds.push(sessionId);
+      }
+    }
+    return sessionIds;
+  };
+
   const deleteSnapshot: AcpChatSessionActions['deleteSnapshot'] = (sessionId) => {
+    const entry = sessionsById.get(sessionId);
     sessionsById.delete(sessionId);
+    if (entry?.lastSubagentRunKey) {
+      notifySubagentRunListeners();
+    }
   };
 
   const getOrCreateEntry = (sessionId: string): StoreEntry => {
@@ -187,10 +256,14 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
       pendingCancelPromptAttemptId: null,
       parentSessionId: null,
       subagentOutcome: null,
+      providerId: null,
+      modelId: null,
       promptCancellationRestoreState: null,
       pendingUserInputRequestIds: new Set(),
+      subagentInputsByRequestId: new Map(),
       pendingLocalSteerMessageIds: new Set(),
       preConfirmedSteerMessageIds: new Set(),
+      lastSubagentRunKey: null,
       adapter: createAcpSessionNotificationAdapter(),
     };
     sessionsById.set(sessionId, entry);
@@ -206,6 +279,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
         listener(snapshot);
       }
     }
+    notifySubagentRunsIfChanged(entry);
     return snapshot;
   };
 
@@ -219,6 +293,17 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     }
     entry.parentSessionId = parentSessionId;
     notify(subagentSessionId, entry);
+  };
+
+  const setSessionProviderModel: AcpChatSessionActions['setSessionProviderModel'] = (
+    sessionId,
+    providerId,
+    modelId
+  ) => {
+    const entry = getOrCreateEntry(sessionId);
+    entry.providerId = providerId ?? entry.providerId;
+    entry.modelId = modelId ?? entry.modelId;
+    return notify(sessionId, entry);
   };
 
   const setSessionMetadata: AcpChatSessionActions['setSessionMetadata'] = (sessionId, session) => {
@@ -308,6 +393,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     }
 
     entry.pendingUserInputRequestIds.delete(userInputRequestId);
+    const wasSubagentInput = entry.subagentInputsByRequestId.delete(userInputRequestId);
 
     if (
       entry.activePromptAttemptId &&
@@ -318,7 +404,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
       return notify(sessionId, entry);
     }
 
-    return snapshotFromEntry(entry);
+    return wasSubagentInput ? notify(sessionId, entry) : snapshotFromEntry(entry);
   };
 
   const setSessionLoadError: AcpChatSessionActions['setSessionLoadError'] = (
@@ -517,8 +603,14 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     const entry = getOrCreateEntry(request.request.sessionId);
     const changes = entry.adapter.applyPermissionRequest(request);
     applyChatStateChanges(entry, changes);
-    entry.pendingUserInputRequestIds.add(
-      acpPermissionUserInputRequestId(request.request.toolCall.toolCallId)
+    const toolCallId = request.request.toolCall.toolCallId;
+    const userInputRequestId = acpPermissionUserInputRequestId(toolCallId);
+    entry.pendingUserInputRequestIds.add(userInputRequestId);
+    trackSubagentInput(
+      entry,
+      userInputRequestId,
+      acpPermissionMessageId(toolCallId),
+      getGooseSubagentSessionId(request.request._meta)
     );
     entry.chatState = ChatState.WaitingForUserInput;
     return notify(request.request.sessionId, entry);
@@ -537,6 +629,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     const changes = entry.adapter.cancelPermissionRequest(toolCallId, generation);
     applyChatStateChanges(entry, changes);
     entry.pendingUserInputRequestIds.delete(acpPermissionUserInputRequestId(toolCallId));
+    entry.subagentInputsByRequestId.delete(acpPermissionUserInputRequestId(toolCallId));
     return notify(sessionId, entry);
   };
 
@@ -544,7 +637,14 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     const entry = getOrCreateEntry(request.sessionId);
     const changes = entry.adapter.applyElicitationRequest(request);
     applyChatStateChanges(entry, changes);
-    entry.pendingUserInputRequestIds.add(acpElicitationUserInputRequestId(request.id));
+    const userInputRequestId = acpElicitationUserInputRequestId(request.id);
+    entry.pendingUserInputRequestIds.add(userInputRequestId);
+    trackSubagentInput(
+      entry,
+      userInputRequestId,
+      request.id,
+      getGooseSubagentSessionId(request.request._meta)
+    );
     entry.chatState = ChatState.WaitingForUserInput;
     return notify(request.sessionId, entry);
   };
@@ -570,9 +670,12 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
 
   return {
     getSnapshot,
+    getRunningSubagentSessionIds,
     subscribe,
+    subscribeSubagentRuns,
     deleteSnapshot,
     linkSubagentSession,
+    setSessionProviderModel,
     setSessionMetadata,
     startSessionLoad,
     finishSessionLoad,
@@ -638,9 +741,18 @@ export function useAcpChatSessionSnapshot(sessionId: string): AcpChatSessionSnap
   return snapshotState.snapshot;
 }
 
+export function useHasRunningSubagents(parentSessionId: string | null | undefined): boolean {
+  return useSyncExternalStore(acpChatSessionStoreInternal.subscribeSubagentRuns, () =>
+    parentSessionId
+      ? acpChatSessionStoreInternal.getRunningSubagentSessionIds(parentSessionId).length > 0
+      : false
+  );
+}
+
 function storeFromInternal(store: AcpChatSessionStoreInternal): AcpChatSessionStore {
   return {
     getSnapshot: store.getSnapshot,
+    getRunningSubagentSessionIds: store.getRunningSubagentSessionIds,
   };
 }
 
@@ -648,6 +760,7 @@ function actionsFromStore(store: AcpChatSessionStoreInternal): AcpChatSessionAct
   return {
     deleteSnapshot: store.deleteSnapshot,
     linkSubagentSession: store.linkSubagentSession,
+    setSessionProviderModel: store.setSessionProviderModel,
     applyAcpSessionNotification: store.applyAcpSessionNotification,
     applyAcpGooseSessionNotification: store.applyAcpGooseSessionNotification,
     applyPermissionRequest: store.applyPermissionRequest,
@@ -693,6 +806,12 @@ function applyChatStateChanges(entry: StoreEntry, changes: AcpChatStateChange[])
         }
         if (change.parentSessionId) {
           entry.parentSessionId = change.parentSessionId;
+        }
+        if (change.providerId) {
+          entry.providerId = change.providerId;
+        }
+        if (change.modelId) {
+          entry.modelId = change.modelId;
         }
         if (change.activeRunId !== undefined) {
           entry.activeRunId = change.activeRunId;
@@ -765,6 +884,25 @@ function resetReplayState(entry: StoreEntry): void {
   entry.pendingLocalSteerMessageIds.clear();
   entry.preConfirmedSteerMessageIds.clear();
   entry.adapter = createAcpSessionNotificationAdapter();
+}
+
+function trackSubagentInput(
+  entry: StoreEntry,
+  userInputRequestId: string,
+  messageId: string,
+  subagentSessionId: string | undefined
+): void {
+  if (subagentSessionId) {
+    entry.subagentInputsByRequestId.set(userInputRequestId, { messageId, subagentSessionId });
+  } else {
+    entry.subagentInputsByRequestId.delete(userInputRequestId);
+  }
+}
+
+function pendingSubagentInputs(entry: StoreEntry): PendingSubagentInput[] {
+  return [...entry.subagentInputsByRequestId]
+    .filter(([userInputRequestId]) => entry.pendingUserInputRequestIds.has(userInputRequestId))
+    .map(([, input]) => ({ ...input }));
 }
 
 export function acpPermissionUserInputRequestId(toolCallId: string): string {
@@ -840,6 +978,9 @@ function snapshotFromEntry(entry: StoreEntry): AcpChatSessionSnapshot {
     pendingCancelPromptAttemptId: entry.pendingCancelPromptAttemptId,
     parentSessionId: entry.parentSessionId,
     subagentOutcome: entry.subagentOutcome,
+    providerId: entry.providerId,
+    modelId: entry.modelId,
+    pendingSubagentInputs: pendingSubagentInputs(entry),
   };
 }
 

@@ -165,6 +165,8 @@ interface ChatInputProps {
   hasActiveRun: boolean;
   onStop?: () => void;
   onSteerQueuedMessage?: (input: UserInput) => Promise<boolean>;
+  /** Send new messages as a steer right away instead of queueing them while the run is busy. */
+  steerWhileBusy?: boolean;
   pauseQueueOnStop?: boolean;
   queueProcessingBlocked?: boolean;
   commandHistory?: string[];
@@ -210,6 +212,7 @@ export default function ChatInput({
   hasActiveRun,
   onStop,
   onSteerQueuedMessage,
+  steerWhileBusy = false,
   pauseQueueOnStop = false,
   queueProcessingBlocked = false,
   commandHistory = [],
@@ -1087,15 +1090,32 @@ export default function ChatInput({
       timestamp: Date.now(),
       images: imageData,
     };
-    setQueuedMessages((prev) => {
-      const newQueue = [...prev, newMessage];
-      // If adding to an empty queue, reset the paused state
-      if (prev.length === 0) {
-        queuePausedRef.current = false;
-        setLastInterruption(null);
-      }
-      return newQueue;
-    });
+    const enqueue = () =>
+      setQueuedMessages((prev) => {
+        const newQueue = [...prev, newMessage];
+        // If adding to an empty queue, reset the paused state
+        if (prev.length === 0) {
+          queuePausedRef.current = false;
+          setLastInterruption(null);
+        }
+        return newQueue;
+      });
+
+    if (steerWhileBusy && hasActiveRun && onSteerQueuedMessage) {
+      clearInputState();
+      void onSteerQueuedMessage({ msg: contentToQueue, images: imageData })
+        .catch(() => false)
+        .then((accepted) => {
+          if (accepted) {
+            LocalMessageStorage.addMessage(contentToQueue);
+          } else {
+            enqueue();
+          }
+        });
+      return true;
+    }
+
+    enqueue();
     clearInputState();
     return true;
   };

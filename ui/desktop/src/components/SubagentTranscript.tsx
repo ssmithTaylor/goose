@@ -9,7 +9,12 @@ import { useNavigation } from '../hooks/useNavigation';
 import { ChatState } from '../types/chatState';
 import type { Message } from '../types/message';
 import MessageList from './MessageList';
-import { SubagentRunControls, SubagentStatusLabel } from './SubagentRunControls';
+import { SubagentPendingApprovals } from './SubagentPendingApprovals';
+import {
+  SubagentModelBadge,
+  SubagentRunControls,
+  SubagentStatusLabel,
+} from './SubagentRunControls';
 import { Button } from './ui/button';
 import { cn } from '../utils';
 
@@ -50,11 +55,10 @@ export function SubagentTranscript({
   const intl = useIntl();
   const setView = useNavigation();
   const snapshot = useAcpChatSessionSnapshot(subagentSessionId);
-  const parentSnapshot = useAcpChatSessionSnapshot(
-    snapshot?.parentSessionId ?? parentSessionId ?? ''
-  );
+  const resolvedParentSessionId = snapshot?.parentSessionId ?? parentSessionId ?? null;
+  const parentSnapshot = useAcpChatSessionSnapshot(resolvedParentSessionId ?? '');
   const running = isSubagentRunning(snapshot);
-  const status = getSubagentStatus(snapshot, parentSnapshot);
+  const status = getSubagentStatus(subagentSessionId, snapshot, parentSnapshot);
   const [expandedState, setExpanded] = useState<boolean | null>(null);
   const wasRunningRef = useRef(false);
   wasRunningRef.current ||= running;
@@ -109,6 +113,7 @@ export function SubagentTranscript({
           <Bot className="size-3.5 shrink-0 text-text-secondary" />
           <span className="font-sans text-sm">{intl.formatMessage(i18n.subagent)}</span>
           {status && <SubagentStatusLabel status={status} />}
+          <SubagentModelBadge subagentSessionId={subagentSessionId} />
         </Button>
         <Button
           variant="ghost"
@@ -137,6 +142,11 @@ export function SubagentTranscript({
               </span>
             )}
           </div>
+          <SubagentPendingApprovals
+            subagentSessionId={subagentSessionId}
+            parentSessionId={resolvedParentSessionId}
+            className="border-t border-border-primary px-4 py-3"
+          />
           {running && (
             <SubagentRunControls
               subagentSessionId={subagentSessionId}

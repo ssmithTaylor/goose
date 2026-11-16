@@ -13,6 +13,8 @@ export type AcpChatStateChange =
       gooseMode?: string;
       parentSessionId?: string;
       subagentOutcome?: SubagentOutcome;
+      providerId?: string;
+      modelId?: string;
     }
   | { type: 'localSteerConfirmed'; messageId: string }
   | { type: 'notification'; notification: NotificationEvent };
@@ -143,6 +145,26 @@ export function getGooseSubagentOutcome(update: { _meta?: unknown }): SubagentOu
   return outcome === 'completed' || outcome === 'failed' || outcome === 'cancelled'
     ? outcome
     : undefined;
+}
+
+export function getGooseSessionModel(update: { _meta?: unknown }): {
+  providerId?: string;
+  modelId?: string;
+} {
+  if (!isRecord(update._meta)) return {};
+  const goose = update._meta.goose;
+  if (!isRecord(goose)) return {};
+  return {
+    ...(typeof goose.provider === 'string' && goose.provider ? { providerId: goose.provider } : {}),
+    ...(typeof goose.model === 'string' && goose.model ? { modelId: goose.model } : {}),
+  };
+}
+
+export function getGooseSubagentSessionId(meta: unknown): string | undefined {
+  if (!isRecord(meta)) return undefined;
+  const goose = meta.goose;
+  if (!isRecord(goose)) return undefined;
+  return typeof goose.subagentSessionId === 'string' ? goose.subagentSessionId : undefined;
 }
 
 export function getGooseQueuedSteer(update: { _meta?: unknown }): string | undefined {

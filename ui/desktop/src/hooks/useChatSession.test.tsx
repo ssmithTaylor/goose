@@ -48,6 +48,9 @@ function renderChatSession(messages: Message[], parentSessionId: string | null =
     activeRunId: null,
     parentSessionId,
     subagentOutcome: null,
+    providerId: null,
+    modelId: null,
+    pendingSubagentInputs: [],
   };
   return renderHook(() => useChatSession({ sessionId: 'sess-1', onStreamFinish: vi.fn() }), {
     wrapper: IntlTestWrapper,

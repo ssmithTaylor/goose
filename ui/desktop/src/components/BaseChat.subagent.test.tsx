@@ -1,10 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { SessionNotification } from '@agentclientprotocol/sdk';
 import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntlTestWrapper } from '../i18n/test-utils';
 import { handleAcpSessionNotification } from '../acp/chatNotifications';
 import { acpChatSessionActions } from '../acp/chatSessionStore';
+import { requestAcpPermission } from '../acp/permissionRequests';
 import type { LiveVoiceController } from '../liveVoice/useLiveVoice';
 import BaseChat from './BaseChat';
 
@@ -135,6 +136,41 @@ describe('BaseChat showing a subagent session', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to parent chat' }));
     expect(screen.getByTestId('location')).toHaveTextContent(`/pair?resumeSessionId=${PARENT_ID}`);
+  });
+
+  it('shows the subagent model and its pending approval in the full view', async () => {
+    await notify({
+      sessionUpdate: 'session_info_update',
+      _meta: {
+        goose: {
+          activeRunId: RUN_ID,
+          parentSessionId: PARENT_ID,
+          provider: 'anthropic',
+          model: 'claude-sonnet',
+        },
+      },
+    });
+    renderSubagentChat();
+
+    expect(await screen.findByTestId('subagent-model')).toHaveTextContent(
+      'anthropic / claude-sonnet'
+    );
+
+    act(() => {
+      void requestAcpPermission({
+        sessionId: PARENT_ID,
+        options: [{ optionId: 'allow_once', name: 'allow_once', kind: 'allow_once' }],
+        toolCall: { toolCallId: 'fwd-1', title: 'shell', rawInput: { command: 'ls' } },
+        _meta: { goose: { subagentSessionId: SUBAGENT_ID } },
+      });
+    });
+
+    expect(screen.getByText('Waiting on approval')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('subagent-pending-approvals')).getByRole('button', {
+        name: 'Allow Once',
+      })
+    ).toBeInTheDocument();
   });
 
   it('falls back to session/load and the manual refresh without live updates', async () => {

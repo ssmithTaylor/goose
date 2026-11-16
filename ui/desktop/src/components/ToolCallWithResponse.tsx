@@ -24,6 +24,11 @@ import { SubagentTranscript } from './SubagentTranscript';
 import { useAcpChatSessionSnapshot } from '../acp/chatSessionStore';
 import { isSubagentRunning } from '../acp/subagentStatus';
 import { defineMessages, useIntl } from '../i18n';
+import {
+  describeSubagentCoordinationTool,
+  formatSubagentCoordinationTool,
+  shortSubagentId,
+} from './subagentCoordinationTools';
 
 type LoadingStatus = 'loading' | 'success' | 'error';
 
@@ -504,10 +509,34 @@ function ToolCallView({
   const subagentWasActiveRef = useRef(false);
   subagentWasActiveRef.current ||= isSubagentActive;
 
+  const intl = useIntl();
+  const coordinationTool = describeSubagentCoordinationTool(toolCall.name, toolCall.arguments);
+  const coordinatedSubagentId =
+    coordinationTool && coordinationTool.kind !== 'askParent'
+      ? coordinationTool.subagentSessionId
+      : null;
+  const coordinatedSubagentName = useAcpChatSessionSnapshot(coordinatedSubagentId ?? '')?.session
+    ?.name;
+
   // Get extension tooltip for the current tool
   const extensionTooltip = getExtensionTooltip(toolCall.name);
 
+  const truncateTitleValue = (value: string) =>
+    value.length > MAX_TITLE_VALUE_LENGTH
+      ? `${value.substring(0, MAX_TITLE_VALUE_LENGTH)}…`
+      : value;
+
   const getToolLabelContent = (): string => {
+    if (coordinationTool) {
+      return formatSubagentCoordinationTool(
+        intl,
+        coordinationTool,
+        coordinatedSubagentName ||
+          (coordinatedSubagentId ? shortSubagentId(coordinatedSubagentId) : ''),
+        truncateTitleValue
+      );
+    }
+
     const args = (toolCall.arguments ?? {}) as Record<string, ToolCallArgumentValue>;
     const toolDisplayName = snakeToTitleCase(getToolName(toolCall.name));
     const firstEntry = Object.entries(args)[0];
@@ -518,11 +547,7 @@ function ToolCallView({
 
     const [key, value] = firstEntry;
     const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-    const shortValue =
-      stringValue.length > MAX_TITLE_VALUE_LENGTH
-        ? `${stringValue.substring(0, MAX_TITLE_VALUE_LENGTH)}…`
-        : stringValue;
-    return `${toolDisplayName} ${key}: ${shortValue}`;
+    return `${toolDisplayName} ${key}: ${truncateTitleValue(stringValue)}`;
   };
   // Map LoadingStatus to ToolCallStatus
   const getToolCallStatus = (loadingStatus: LoadingStatus): ToolCallStatus => {

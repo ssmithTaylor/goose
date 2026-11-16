@@ -21,7 +21,7 @@ export function applyPermissionRequest(
   const prompt = permissionPrompt(request);
 
   state.messages.push({
-    id: `acp_permission_${toolCallId}`,
+    id: acpPermissionMessageId(toolCallId),
     role: 'assistant',
     created: Math.floor(Date.now() / 1000),
     content: [
@@ -41,6 +41,10 @@ export function applyPermissionRequest(
   });
 
   return messagesChange(state);
+}
+
+export function acpPermissionMessageId(toolCallId: string): string {
+  return `acp_permission_${toolCallId}`;
 }
 
 export function cancelPermissionRequest(

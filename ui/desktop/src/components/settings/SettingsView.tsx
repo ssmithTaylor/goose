@@ -2,6 +2,7 @@ import { ScrollArea } from '../ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { View, ViewOptions } from '../../utils/navigationUtils';
 import ModelsSection from './models/ModelsSection';
+import SubagentModelsSection from './models/SubagentModelsSection';
 import ExternalBackendSection from './app/ExternalBackendSection';
 import AgentLoopSettings from './AgentLoopSettings';
 import AppSettingsSection from './app/AppSettingsSection';
@@ -270,6 +271,7 @@ export default function SettingsView({
                 className="mt-0 focus-visible:outline-none focus-visible:ring-0"
               >
                 <ModelsSection setView={setView} />
+                <SubagentModelsSection setView={setView} />
               </TabsContent>
 
               {localInference && (

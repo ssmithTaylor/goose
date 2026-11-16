@@ -11,6 +11,7 @@ import ChatInput from './ChatInput';
 import { ChatInputCard } from './ChatInputCard';
 import { SubagentSessionNotice } from './SubagentSessionNotice';
 import { SubagentRunControls } from './SubagentRunControls';
+import { SubagentPendingApprovals } from './SubagentPendingApprovals';
 import { Button } from './ui/button';
 import { ScrollArea, ScrollAreaHandle } from './ui/scroll-area';
 import { useFileDrop } from '../hooks/useFileDrop';
@@ -36,6 +37,7 @@ import { Goose } from './icons';
 import EnvironmentBadge from './GooseSidebar/EnvironmentBadge';
 import SessionActionsHeader from './SessionActionsHeader';
 import { isAcpRecovering, subscribeToAcpRecovery } from '../acp/acpConnection';
+import { useHasRunningSubagents } from '../acp/chatSessionStore';
 import type { LiveVoiceAvailabilityResponse_unstable } from '@aaif/goose-acp-client';
 import { acpGetLiveVoiceAvailability } from '../acp/liveVoice';
 import type { LiveVoiceController } from '../liveVoice/useLiveVoice';
@@ -179,6 +181,7 @@ export default function BaseChat({
   );
 
   const sessionLoaded = session !== undefined;
+  const hasRunningSubagents = useHasRunningSubagents(sessionId);
   const isSubagentSession = session?.session_type === 'sub_agent' || parentSessionId !== null;
   const hasLiveSubagentUpdates =
     parentSessionId !== null && (hasActiveRun || subagentOutcome !== null);
@@ -584,6 +587,11 @@ export default function BaseChat({
 
         {isSubagentSession && hasLiveSubagentUpdates ? (
           <ChatInputCard className="relative z-30 mx-4 mb-4 px-4 py-3">
+            <SubagentPendingApprovals
+              subagentSessionId={sessionId}
+              parentSessionId={parentSessionId}
+              className="mb-3 max-h-[24rem] overflow-y-auto"
+            />
             <SubagentRunControls subagentSessionId={sessionId} />
           </ChatInputCard>
         ) : isSubagentSession ? (
@@ -606,6 +614,7 @@ export default function BaseChat({
               hasActiveRun={hasActiveRun}
               onStop={stopStreaming}
               onSteerQueuedMessage={onSteerQueuedMessage}
+              steerWhileBusy={hasRunningSubagents}
               pauseQueueOnStop={pauseQueueOnStop}
               queueProcessingBlocked={queueProcessingBlocked || acpRecovering}
               commandHistory={commandHistory}

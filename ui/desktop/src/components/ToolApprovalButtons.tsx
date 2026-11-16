@@ -50,6 +50,7 @@ const globalApprovalState = new Map<
     isClicked: boolean;
   }
 >();
+const approvalStateListeners = new Set<(approvalStateKey: string) => void>();
 
 export interface ToolApprovalData {
   generation?: string;
@@ -74,7 +75,28 @@ export default function ToolApprovalButtons({ data }: { data: ToolApprovalData }
     setDecision(action);
     setIsClicked(true);
     setApprovalError(null);
+    globalApprovalState.set(approvalStateKey, { decision: action, isClicked: true });
+    for (const listener of approvalStateListeners) {
+      listener(approvalStateKey);
+    }
   };
+
+  // The same request can show in the parent chat and in a subagent's nested view.
+  useEffect(() => {
+    const listener = (resolvedKey: string) => {
+      const resolvedState = globalApprovalState.get(resolvedKey);
+      if (resolvedKey !== approvalStateKey || !resolvedState) {
+        return;
+      }
+      setDecision(resolvedState.decision);
+      setIsClicked(resolvedState.isClicked);
+      setApprovalError(null);
+    };
+    approvalStateListeners.add(listener);
+    return () => {
+      approvalStateListeners.delete(listener);
+    };
+  }, [approvalStateKey]);
 
   useEffect(() => {
     const currentState = globalApprovalState.get(approvalStateKey);

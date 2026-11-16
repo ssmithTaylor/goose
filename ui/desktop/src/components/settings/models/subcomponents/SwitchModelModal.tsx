@@ -246,8 +246,10 @@ type SwitchModelModalProps = {
   onModelSelected?: (model: string, provider: string) => void;
   initialProvider?: string | null;
   titleOverride?: string;
+  descriptionOverride?: string;
   sessionModel?: string | null;
   sessionProvider?: string | null;
+  saveModel?: (model: Model) => Promise<boolean>;
 };
 export const SwitchModelModal = ({
   sessionId,
@@ -256,8 +258,10 @@ export const SwitchModelModal = ({
   onModelSelected,
   initialProvider,
   titleOverride,
+  descriptionOverride,
   sessionModel,
   sessionProvider,
+  saveModel,
 }: SwitchModelModalProps) => {
   const intl = useIntl();
 
@@ -313,7 +317,7 @@ export const SwitchModelModal = ({
   const [selectedModelReasoning, setSelectedModelReasoning] = useState<boolean | null>(null);
 
   const modelReasoning = selectedModelReasoning ?? selectedPredefinedModel?.reasoning;
-  const showThinkingControl = modelReasoning === true;
+  const showThinkingControl = modelReasoning === true && !saveModel;
   const resolveSelectedModelReasoning = useCallback(
     (providerName: string, modelName: string, fallback?: boolean) => {
       const requestId = ++reasoningRequestId.current;
@@ -422,6 +426,14 @@ export const SwitchModelModal = ({
           request_params: { ...modelObj.request_params, thinking_effort: effort },
         };
         acpSaveThinkingEffort(effort).catch(console.warn);
+      }
+
+      if (saveModel) {
+        if (await saveModel(modelObj)) {
+          onModelSelected?.(modelObj.name, modelObj.provider || '');
+        }
+        onClose();
+        return;
       }
 
       const success = await changeModel(sessionId, modelObj);
@@ -747,7 +759,9 @@ export const SwitchModelModal = ({
             <Bot size={24} className="text-text-primary" />
             {titleOverride || intl.formatMessage(i18n.title)}
           </DialogTitle>
-          <DialogDescription>{intl.formatMessage(i18n.description)}</DialogDescription>
+          <DialogDescription>
+            {descriptionOverride || intl.formatMessage(i18n.description)}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-4 py-4">

@@ -1,9 +1,24 @@
 import { useState, type FormEvent } from 'react';
-import { CircleAlert, CircleCheck, CircleStop, CircleX, LoaderCircle, Send } from 'lucide-react';
+import {
+  Bot,
+  CircleAlert,
+  CircleCheck,
+  CircleStop,
+  CircleX,
+  LoaderCircle,
+  Send,
+} from 'lucide-react';
 import { defineMessages, useIntl } from '../i18n';
 import { acpChatSessionController } from '../acp/chatSessionController';
-import { useAcpChatSessionSnapshot } from '../acp/chatSessionStore';
-import { getSubagentStatus, isSubagentRunning, type SubagentStatus } from '../acp/subagentStatus';
+import { acpChatSessionActions, useAcpChatSessionSnapshot } from '../acp/chatSessionStore';
+import {
+  getSubagentModel,
+  getSubagentStatus,
+  isSubagentRunning,
+  type SubagentStatus,
+} from '../acp/subagentStatus';
+import { useNavigation } from '../hooks/useNavigation';
+import { SwitchModelModal } from './settings/models/subcomponents/SwitchModelModal';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { cn } from '../utils';
@@ -53,7 +68,56 @@ const i18n = defineMessages({
     id: 'subagentRunControls.readOnly',
     defaultMessage: 'This subagent has finished. Its transcript is read-only.',
   },
+  model: {
+    id: 'subagentRunControls.model',
+    defaultMessage: 'Model',
+  },
+  switchModelLabel: {
+    id: 'subagentRunControls.switchModelLabel',
+    defaultMessage: 'Switch the subagent model',
+  },
+  switchModelTitle: {
+    id: 'subagentRunControls.switchModelTitle',
+    defaultMessage: 'Switch subagent model',
+  },
+  switchModelDescription: {
+    id: 'subagentRunControls.switchModelDescription',
+    defaultMessage:
+      'The subagent uses the new model from its next model call, or restarts on it with its work so far.',
+  },
+  modelBadgeLabel: {
+    id: 'subagentRunControls.modelBadgeLabel',
+    defaultMessage: 'Subagent model: {model}',
+  },
 });
+
+export function SubagentModelBadge({
+  subagentSessionId,
+  className,
+}: {
+  subagentSessionId: string;
+  className?: string;
+}) {
+  const intl = useIntl();
+  const { providerId, modelId } = getSubagentModel(useAcpChatSessionSnapshot(subagentSessionId));
+  const label = [providerId, modelId].filter(Boolean).join(' / ');
+  if (!label) {
+    return null;
+  }
+
+  return (
+    <span
+      data-testid="subagent-model"
+      title={intl.formatMessage(i18n.modelBadgeLabel, { model: label })}
+      className={cn(
+        'min-w-0 truncate rounded-full border border-border-primary bg-background-secondary px-2 py-0.5 text-xs text-text-secondary',
+        className
+      )}
+    >
+      {label}
+    </span>
+  );
+}
 
 export function SubagentStatusLabel({ status }: { status: SubagentStatus }) {
   const intl = useIntl();
@@ -98,15 +162,18 @@ export function SubagentRunControls({
   className,
 }: SubagentRunControlsProps) {
   const intl = useIntl();
+  const setView = useNavigation();
   const snapshot = useAcpChatSessionSnapshot(subagentSessionId);
   const parentSnapshot = useAcpChatSessionSnapshot(snapshot?.parentSessionId ?? '');
-  const status = getSubagentStatus(snapshot, parentSnapshot);
+  const status = getSubagentStatus(subagentSessionId, snapshot, parentSnapshot);
   const running = isSubagentRunning(snapshot);
   const runId = snapshot?.activeRunId ?? null;
+  const subagentModel = getSubagentModel(snapshot);
   const [stopRequestedRunId, setStopRequestedRunId] = useState<string | null>(null);
   const [steerText, setSteerText] = useState('');
   const [steering, setSteering] = useState(false);
   const [steerFailed, setSteerFailed] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   if (!status) {
     return null;
@@ -153,12 +220,31 @@ export function SubagentRunControls({
     </Button>
   );
 
+  const modelButton = running && (
+    <Button
+      variant="ghost"
+      size="xs"
+      onClick={() => setModelPickerOpen(true)}
+      disabled={stopRequested}
+      aria-label={intl.formatMessage(i18n.switchModelLabel)}
+    >
+      <Bot />
+      {intl.formatMessage(i18n.model)}
+    </Button>
+  );
+
   return (
     <div className={cn('flex flex-col gap-2', className)}>
       {showStatus && (
         <div className="flex items-center justify-between gap-2">
-          <SubagentStatusLabel status={status} />
-          {stopButton}
+          <div className="flex min-w-0 items-center gap-2">
+            <SubagentStatusLabel status={status} />
+            <SubagentModelBadge subagentSessionId={subagentSessionId} />
+          </div>
+          <div className="flex items-center gap-1">
+            {modelButton}
+            {stopButton}
+          </div>
         </div>
       )}
       {running ? (
@@ -180,6 +266,7 @@ export function SubagentRunControls({
             <Send />
             {intl.formatMessage(i18n.steer)}
           </Button>
+          {!showStatus && modelButton}
           {!showStatus && stopButton}
         </form>
       ) : (
@@ -189,6 +276,20 @@ export function SubagentRunControls({
         <span role="alert" className="text-xs text-red-500">
           {intl.formatMessage(i18n.steerFailed)}
         </span>
+      )}
+      {modelPickerOpen && (
+        <SwitchModelModal
+          sessionId={subagentSessionId}
+          setView={setView}
+          onClose={() => setModelPickerOpen(false)}
+          titleOverride={intl.formatMessage(i18n.switchModelTitle)}
+          descriptionOverride={intl.formatMessage(i18n.switchModelDescription)}
+          sessionModel={subagentModel.modelId}
+          sessionProvider={subagentModel.providerId}
+          onModelSelected={(model, provider) =>
+            acpChatSessionActions.setSessionProviderModel(subagentSessionId, provider, model)
+          }
+        />
       )}
     </div>
   );
