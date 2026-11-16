@@ -44,14 +44,13 @@ You can run multiple subagents sequentially or in parallel.
 
 ## Monitoring Subagent Activity
 
-When goose delegates work to a subagent, you can see the subagent's tool calls in real-time. This transparency helps you understand what the subagent is doing and verify it's on the right track.
+When goose delegates work to a subagent, you can watch the subagent work in real time. This transparency helps you understand what the subagent is doing and verify it's on the right track.
 
 <Tabs groupId="interface">
   <TabItem value="desktop" label="goose Desktop" default>
-    Subagent tool calls appear as expandable sections within the conversation. Click to expand and see the full details of each tool call, including:
-    - The tool name being invoked
-    - Arguments passed to the tool
-    - Tool output and results
+    Each subagent appears inside its `delegate` tool call in the conversation, with a live transcript: its messages, its thinking as it streams, and its tool calls with their arguments and results. A status line shows whether it is running, thinking, waiting on your approval, completed, failed or stopped, and a badge shows the provider and model it runs on.
+
+    Click **Open** to show the subagent in the main chat area, and **Back to parent chat** to return. Subagent sessions are read-only: you can steer a running subagent, but not send it a normal message.
   </TabItem>
   <TabItem value="cli" label="goose CLI">
     Subagent tool calls are displayed inline with visual indicators showing the tool name and extension. For example:
@@ -70,6 +69,22 @@ When goose delegates work to a subagent, you can see the subagent's tool calls i
 :::info
 If a subagent fails or times out (5-minute default), you will receive no output from that subagent. For parallel execution, if any subagent fails, you get results only from the successful ones.
 :::
+
+## Steering and Stopping Subagents
+
+Delegation is synchronous: goose's turn stays open until every subagent it started has finished. While they run:
+
+- **Steer the main chat.** Messages you send to the main chat are applied straight away, and goose responds while its subagents keep working. Until they finish, goose can only steer or wrap up a subagent, start another subagent, or use read-only tools (tools whose MCP annotations mark them `readOnlyHint: true`); every other tool becomes available again once the subagents return. Your approval mode and hooks still apply.
+- **Steer one subagent.** In goose Desktop, use the steer box in the subagent's view. goose is also told what you said, so its picture of the work stays accurate. Over ACP, call `_goose/unstable/session/steer` with the subagent's session ID and its `activeRunId`.
+- **Stop one subagent.** Use **Stop** in the subagent's view, or ACP `session/cancel` with the subagent's session ID. Only that subagent stops; goose and the other subagents continue, and goose is told the subagent was stopped.
+- **Switch a subagent's model.** Use **Model** in the subagent's view. The new model applies from the subagent's next model call, in the same session.
+
+goose itself coordinates with running subagents through two tools:
+
+| Tool | Used by | What it does |
+|---|---|---|
+| `steer_subagent` | goose | Sends a running subagent a message, answers its pending question, or with `wrap_up: true` asks it to finish now with its best result so far (reported as completed). |
+| `ask_parent` | subagent | Asks goose a question and waits for the answer. |
 
 ## Internal Subagents
 
@@ -302,7 +317,37 @@ Subagent turn limits use the first configured value below:
 4. `GOOSE_MAX_TURNS` in the environment or configuration file.
 5. The default of 1000.
 
-`GOOSE_SUBAGENT_MODEL` and `GOOSE_SUBAGENT_PROVIDER` set defaults for the subagent model and provider; recipe [`settings`](/docs/guides/recipes/recipe-reference#settings) take precedence over both.
+`GOOSE_SUBAGENT_MODEL` and `GOOSE_SUBAGENT_PROVIDER` set defaults for the subagent model and provider; recipe [`settings`](/docs/guides/recipes/recipe-reference#settings) take precedence over both. In goose Desktop, set them under **Settings > Models > Subagent models**.
+
+### Model Routing
+
+A routing table lets goose pick a subagent's model by the kind of work (a *capability*) and how demanding it is (a *tier*: `fast`, `balanced` or `powerful`). Edit it under **Settings > Models > Subagent models**, or in `config.yaml`:
+
+```yaml
+GOOSE_SUBAGENT_ROUTING:
+  default_capability: general
+  capabilities:
+    general:
+      description: Everyday tasks, research, summaries, writing
+      tiers:
+        fast: { provider: anthropic, model: <model> }
+        balanced: { provider: anthropic, model: <model> }
+        powerful: { provider: anthropic, model: <model> }
+    image-generation:
+      description: Creating or editing images
+      requires: [vision]
+      extensions: [comfyui]
+      instructions: Use the image tools; return file paths.
+      tiers:
+        balanced: { provider: openai, model: <model> }
+```
+
+When a table is configured, `delegate` gains `capability`, `tier` and `routing_reason` arguments, and its description lists your capabilities, so goose chooses one per task. Without a `tier`, goose uses `balanced`. A missing tier falls back to the nearest configured tier of the same capability, then to the same tier of `default_capability`.
+
+- `requires` filters models using goose's model metadata: `vision` (accepts images), `reasoning`, and `min_context:<tokens>`. Tool calling is always required. Requirements the metadata doesn't record count as met.
+- `extensions` are enabled for the subagent, and `instructions` are added to its instructions. Generation capabilities (images, video, audio) are a chat model plus the extensions that do the generating.
+
+With a table, the subagent's model comes from the first of: a model named in the `delegate` call, recipe or custom-agent settings, the routing table, `GOOSE_SUBAGENT_MODEL`/`GOOSE_SUBAGENT_PROVIDER`, and finally the main chat's model. goose Desktop shows the choice on the subagent's badge, for example `code · balanced · <model>`, with goose's reason on hover.
 
 ### Extension Control
 
