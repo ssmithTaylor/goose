@@ -14,7 +14,7 @@ use crate::agents::mcp_client::GooseMcpHostInfo;
 use crate::agents::state_machine::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
 };
-use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate};
+use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate, SubagentModel};
 use crate::agents::{
     Attachment, ExtensionConfig, ExtensionLoadResult, GoosePlatform, SessionConfig,
     StateMachineServices, StateMachineServicesConfig,
@@ -2317,7 +2317,7 @@ impl AcpConnection {
         let acp_session_id = SessionId::new(subagent_id);
         let notifier = ToolCallNotifier::new(cx, &acp_session_id).for_subagent_of(Some(parent_id));
         let event = match &live.update {
-            SubagentLiveUpdate::Started { run_id } => {
+            SubagentLiveUpdate::Started { run_id, model } => {
                 streams.insert(
                     subagent_id.to_string(),
                     SubagentStream {
@@ -2326,7 +2326,12 @@ impl AcpConnection {
                     },
                 );
                 return notifier.send(SessionUpdate::SessionInfoUpdate(
-                    SessionInfoUpdate::new().meta(Self::subagent_run_meta(Some(run_id), None)),
+                    SessionInfoUpdate::new().meta(Self::subagent_model_meta(Some(run_id), model)),
+                ));
+            }
+            SubagentLiveUpdate::ModelChanged { run_id, model } => {
+                return notifier.send(SessionUpdate::SessionInfoUpdate(
+                    SessionInfoUpdate::new().meta(Self::subagent_model_meta(Some(run_id), model)),
                 ));
             }
             SubagentLiveUpdate::Finished(outcome) => {
@@ -2405,6 +2410,18 @@ impl AcpConnection {
             crate::agents::AgentEvent::HistoryReplaced(_) => {}
         }
         Ok(())
+    }
+
+    fn subagent_model_meta(run_id: Option<&str>, model: &SubagentModel) -> Meta {
+        let mut meta = Self::active_run_meta(run_id);
+        if let Some(serde_json::Value::Object(goose)) = meta.get_mut("goose") {
+            for (key, value) in [("provider", &model.provider), ("model", &model.model)] {
+                if let Some(value) = value {
+                    goose.insert(key.to_string(), value.clone().into());
+                }
+            }
+        }
+        meta
     }
 
     fn subagent_run_meta(run_id: Option<&str>, outcome: Option<&SubagentOutcome>) -> Meta {
@@ -2546,7 +2563,7 @@ impl AcpConnection {
         let message_id = format!("steer_{}", Uuid::new_v4());
         let message = message.with_id(message_id.clone());
         self.services
-            .steer(&req.session_id, message)
+            .steer_from_user(&req.session_id, message)
             .await
             .internal_err()?;
 
@@ -2584,12 +2601,31 @@ impl AcpConnection {
         Ok(())
     }
 
+    /// A running subagent is already resident under its parent's turn; it is not activated as a
+    /// session of this connection.
+    async fn open_session_unless_running_subagent(
+        &self,
+        session_id: &str,
+    ) -> Result<(), agent_client_protocol::Error> {
+        if self
+            .services
+            .subagent_events
+            .running_parent_of(session_id)
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.open_session(session_id).await
+    }
+
+    /// A running subagent continues on the new model from its next model call.
     async fn on_set_model(
         &self,
         session_id: &str,
         model_id: &str,
     ) -> Result<(), agent_client_protocol::Error> {
-        self.open_session(session_id).await?;
+        self.open_session_unless_running_subagent(session_id)
+            .await?;
         let current_provider = self
             .services
             .provider(session_id)
@@ -2614,6 +2650,10 @@ impl AcpConnection {
             .switch_provider(session_id, &provider_name, model_config)
             .await
             .internal_err_ctx("Failed to switch provider")?;
+        self.services
+            .announce_subagent_model(session_id)
+            .await
+            .internal_err()?;
         Ok(())
     }
 
@@ -2627,7 +2667,8 @@ impl AcpConnection {
             .get_session(&session_id.0, false)
             .await
             .internal_err()?;
-        self.open_session(&session_id.0).await?;
+        self.open_session_unless_running_subagent(&session_id.0)
+            .await?;
         let provider = self
             .services
             .provider(&session_id.0)
@@ -2718,7 +2759,8 @@ impl AcpConnection {
         request_params: Option<std::collections::HashMap<String, serde_json::Value>>,
     ) -> Result<(), agent_client_protocol::Error> {
         let config = self.config()?;
-        self.open_session(session_id).await?;
+        self.open_session_unless_running_subagent(session_id)
+            .await?;
         let current_provider = self
             .services
             .provider(session_id)
@@ -2771,6 +2813,10 @@ impl AcpConnection {
             .switch_provider(session_id, &resolved_provider_name, model_config)
             .await
             .internal_err_ctx("Failed to switch provider")?;
+        self.services
+            .announce_subagent_model(session_id)
+            .await
+            .internal_err()?;
         self.subscribe_thinking_effort_updates(session_id).await;
         Ok(())
     }
@@ -4107,7 +4153,9 @@ print(\"hello, world\")
 
     #[tokio::test]
     async fn a_parent_prompt_streams_its_subagents_events_under_their_own_session() {
-        use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate};
+        use crate::agents::subagent_events::{
+            SubagentLiveEvent, SubagentLiveUpdate, SubagentModel,
+        };
         use goose_agent::subagent::SubagentOutcome;
 
         let root = tempfile::tempdir().unwrap();
@@ -4158,6 +4206,10 @@ print(\"hello, world\")
                     let events = stream::once(async move {
                         publish(SubagentLiveUpdate::Started {
                             run_id: "subagent_1".to_string(),
+                            model: SubagentModel {
+                                provider: Some("openai".to_string()),
+                                model: Some("gpt-test".to_string()),
+                            },
                         });
                         for message in [
                             Message::assistant()
@@ -4183,6 +4235,7 @@ print(\"hello, world\")
                             parent_session_id: orphan_parent,
                             update: SubagentLiveUpdate::Started {
                                 run_id: "subagent_2".to_string(),
+                                model: SubagentModel::default(),
                             },
                         });
                     })
@@ -4242,6 +4295,8 @@ print(\"hello, world\")
                         .iter()
                         .all(|goose| goose["parentSessionId"] == parent_id.as_str()));
                     assert_eq!(metas[0]["activeRunId"], "subagent_1");
+                    assert_eq!(metas[0]["provider"], "openai");
+                    assert_eq!(metas[0]["model"], "gpt-test");
                     assert!(matches!(
                         &received[1].update,
                         SessionUpdate::AgentMessageChunk(chunk)

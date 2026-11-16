@@ -21,7 +21,7 @@ use crate::agents::state_machine::{
     Operation, StateMachine, DEFAULT_BLOCK_CAP,
 };
 use crate::agents::state_machine_builder::{build_state_machine, StateMachineConfig};
-use crate::agents::subagent_events::SubagentEventHub;
+use crate::agents::subagent_events::{SubagentEventHub, SubagentLiveEvent, SubagentLiveUpdate};
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::types::{
     SessionConfig, DEFAULT_ON_FAILURE_TIMEOUT_SECONDS, DEFAULT_RETRY_TIMEOUT_SECONDS,
@@ -330,6 +330,7 @@ pub struct StateMachineServices {
     pub disable_session_naming: bool,
     pub runtime: SessionRuntime,
     pub(crate) subagent_events: Arc<SubagentEventHub>,
+    pub(crate) subagent_coordination: Arc<super::subagent_coordination::SubagentCoordination>,
 
     pub extension_manager: Arc<ExtensionManager>,
 
@@ -381,6 +382,7 @@ impl StateMachineServices {
             disable_session_naming: config.disable_session_naming,
             runtime: SessionRuntime::new(config.max_sessions),
             subagent_events: Arc::default(),
+            subagent_coordination: Arc::default(),
             hook_manager: config.hooks.unwrap_or_else(|| {
                 crate::hooks::HookManager::load(std::env::current_dir().ok().as_deref())
             }),
@@ -389,6 +391,9 @@ impl StateMachineServices {
         services
             .runtime
             .runs
+            .set_services(Arc::downgrade(&services));
+        services
+            .extension_manager
             .set_services(Arc::downgrade(&services));
         if let Some(scheduler) = &services.scheduler {
             scheduler.run_jobs_on(&services);
@@ -401,6 +406,40 @@ impl StateMachineServices {
         let prompt = agent_visible_message_text(&message);
         self.runtime.steer(session_id, message).await;
         self.emit_user_prompt_submit(&session, prompt).await;
+        Ok(())
+    }
+
+    /// A steer the user sends a running subagent is also noted for its parent, which reads it
+    /// the next time it responds.
+    pub async fn steer_from_user(&self, session_id: &str, message: Message) -> Result<()> {
+        let text = agent_visible_message_text(&message);
+        self.steer(session_id, message).await?;
+        if let Some(parent_session_id) = self.subagent_events.running_parent_of(session_id) {
+            self.subagent_coordination.note_for_parent(
+                &parent_session_id,
+                format!("The user told subagent {session_id}: {text}"),
+            );
+        }
+        Ok(())
+    }
+
+    /// Tells the parent's client which model a running subagent uses from now on.
+    pub(crate) async fn announce_subagent_model(&self, session_id: &str) -> Result<()> {
+        let (Some(parent_session_id), Some(run_id)) = (
+            self.subagent_events.running_parent_of(session_id),
+            self.runtime.runs.agent_run_id(session_id),
+        ) else {
+            return Ok(());
+        };
+        let session = self.session_manager.get_session(session_id, false).await?;
+        self.subagent_events.publish(SubagentLiveEvent {
+            subagent_session_id: session_id.to_string(),
+            parent_session_id,
+            update: SubagentLiveUpdate::ModelChanged {
+                run_id,
+                model: super::subagent_handler::subagent_model(&session),
+            },
+        });
         Ok(())
     }
 
@@ -668,6 +707,7 @@ impl StateMachineServices {
                 request_id,
                 ConfirmationAnswer::StateMachine(state_machine_permission),
             )?;
+            self.runtime.wake(session_id);
             return Ok(());
         }
 
@@ -760,6 +800,7 @@ impl StateMachineServices {
             tool_inspection_manager: &self.tool_inspection_manager,
             hook_manager: self.hook_manager.clone(),
             steer_queue,
+            wake: self.runtime.wake_signal(&session_config.id),
             subagent_runner: ForegroundSubagentRunner::new(Arc::clone(self)),
             retry_timeout: settings.retry_timeout,
             on_failure_timeout: settings.on_failure_timeout,
@@ -918,11 +959,13 @@ impl StateMachineServices {
         Ok(self.turn(session_config, cancel, turn_guard, true))
     }
 
-    /// Runs a subagent on the conversation saved for it.
+    /// Runs a subagent on the conversation saved for it. A continued turn picks up where an
+    /// earlier one stopped, so its prompt hooks have already run.
     pub(super) async fn run_subagent_turn(
         self: &Arc<Self>,
         session_config: SessionConfig,
         cancel: CancellationToken,
+        continued: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent>>> {
         let turn_guard = self
             .runtime
@@ -930,7 +973,9 @@ impl StateMachineServices {
             .session(&session_config.id)
             .try_start_turn()?;
         turn_guard.state().start_new_turn();
-        self.emit_hooks_for_saved_prompt(&session_config.id).await?;
+        if !continued {
+            self.emit_hooks_for_saved_prompt(&session_config.id).await?;
+        }
         Ok(self.turn(session_config, cancel, turn_guard, true))
     }
 

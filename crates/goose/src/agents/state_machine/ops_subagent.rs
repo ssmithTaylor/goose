@@ -1,14 +1,23 @@
+use std::sync::{Arc, OnceLock};
+
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::future;
 use futures::stream::{self, BoxStream, StreamExt};
 use goose_agent::subagent::{SubagentOutcome, SubagentRunner, SubagentUpdate};
+use goose_providers::conversation::{effective_role, EffectiveRole};
 use rmcp::model::Role;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::final_output_tool::FinalOutputTool;
-use crate::agents::state_machine::Emitter;
-use crate::agents::subagent_handler::ForegroundSubagentRunner;
+use crate::agents::state_machine::{
+    applied, not_applicable, yielded, Emitter, GooseEffect, Operation, OperationResult,
+};
+use crate::agents::subagent_coordination::{waiting_note, SubagentCoordination};
+use crate::agents::subagent_events::{SubagentEventHub, SubagentModel};
+use crate::agents::subagent_handler::{subagent_model, ForegroundSubagentRunner};
 use crate::conversation::message::{Message, MessageContent, SystemNotificationType};
+use crate::conversation::Conversation;
 use crate::session::{Session, SessionType};
 use crate::utils::safe_truncate;
 
@@ -173,6 +182,104 @@ impl SubagentRunner<Session> for ForegroundSubagentRunner {
         if let Some(notice) = notice {
             emit.message(inline_notice(notice));
         }
+    }
+}
+
+fn model_call_next(conversation: &Conversation) -> bool {
+    conversation.last().is_some_and(|last| {
+        last.is_agent_visible()
+            && matches!(
+                effective_role(last),
+                EffectiveRole::User | EffectiveRole::Tool
+            )
+    })
+}
+
+/// While a parent waits on its subagents: tells it what is still running and which questions
+/// wait for its answer, and adds the notes it should read before its next response.
+pub(crate) struct SubagentCoordinationOperation {
+    subagent_events: Arc<SubagentEventHub>,
+    coordination: Arc<SubagentCoordination>,
+}
+
+impl SubagentCoordinationOperation {
+    pub(crate) fn new(
+        subagent_events: Arc<SubagentEventHub>,
+        coordination: Arc<SubagentCoordination>,
+    ) -> Self {
+        Self {
+            subagent_events,
+            coordination,
+        }
+    }
+}
+
+#[async_trait]
+impl Operation<Session, GooseEffect> for SubagentCoordinationOperation {
+    fn name(&self) -> &'static str {
+        "subagent_coordination"
+    }
+
+    async fn moim_parts(
+        &self,
+        session: &Session,
+        _conversation: &Conversation,
+    ) -> Result<Vec<String>> {
+        let running = self.subagent_events.running_subagents_of(&session.id);
+        if running.is_empty() {
+            return Ok(Vec::new());
+        }
+        let questions = self.coordination.questions_for(&session.id);
+        Ok(vec![waiting_note(&running, &questions)])
+    }
+
+    async fn run(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        emit: &Emitter,
+    ) -> Result<OperationResult<GooseEffect>> {
+        if !model_call_next(conversation) {
+            return not_applicable();
+        }
+        let notes = self.coordination.take_notes(&session.id);
+        if notes.is_empty() {
+            return not_applicable();
+        }
+        let note = Message::user().with_text(notes.join("\n")).agent_only();
+        applied([emit.message(note).into()])
+    }
+}
+
+/// Stops a subagent's turn before its next model call once another model is chosen for it,
+/// so that the turn continues on that model.
+#[derive(Default)]
+pub(crate) struct SubagentModelSwitchOperation {
+    started_with: OnceLock<SubagentModel>,
+}
+
+#[async_trait]
+impl Operation<Session, GooseEffect> for SubagentModelSwitchOperation {
+    fn name(&self) -> &'static str {
+        "subagent_model_switch"
+    }
+
+    async fn run(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        _emit: &Emitter,
+    ) -> Result<OperationResult<GooseEffect>> {
+        if session.session_type != SessionType::SubAgent {
+            return not_applicable();
+        }
+        let selected = subagent_model(session);
+        if *self.started_with.get_or_init(|| selected.clone()) == selected
+            || !model_call_next(conversation)
+        {
+            return not_applicable();
+        }
+        yielded()
     }
 }
 

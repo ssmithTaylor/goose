@@ -25,6 +25,7 @@ mod session_hooks;
 mod session_runtime;
 pub mod state_machine;
 mod state_machine_builder;
+pub(crate) mod subagent_coordination;
 pub(crate) mod subagent_events;
 pub mod subagent_execution_tool;
 pub(crate) mod subagent_handler;

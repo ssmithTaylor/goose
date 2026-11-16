@@ -3,7 +3,7 @@ use crate::{
         final_output_tool::FinalOutputTool,
         services::user_event,
         state_machine::messages_since_kickoff,
-        subagent_events::{SubagentLiveEvent, SubagentLiveUpdate},
+        subagent_events::{SubagentLiveEvent, SubagentLiveUpdate, SubagentModel},
         AgentEvent, SessionConfig, StateMachineServices,
     },
     conversation::message::{ActionRequiredData, Message, MessageContent},
@@ -82,6 +82,16 @@ pub(crate) async fn prepare_subagent(
     })
 }
 
+pub(crate) fn subagent_model(session: &Session) -> SubagentModel {
+    SubagentModel {
+        provider: session.provider_name.clone(),
+        model: session
+            .model_config
+            .as_ref()
+            .map(|model_config| model_config.model_name.clone()),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ForegroundSubagentRunner {
     services: Arc<StateMachineServices>,
@@ -94,6 +104,10 @@ impl ForegroundSubagentRunner {
 
     fn session_manager(&self) -> &SessionManager {
         &self.services.session_manager
+    }
+
+    pub(crate) fn services(&self) -> &Arc<StateMachineServices> {
+        &self.services
     }
 
     pub(crate) async fn load(&self, subagent_id: &str) -> Result<Session> {
@@ -114,6 +128,8 @@ impl ForegroundSubagentRunner {
         )
     }
 
+    /// A model chosen while the subagent runs stops its turn before the next model call; the
+    /// turn then continues on the new model.
     async fn run_to_end(
         &self,
         subagent: &Session,
@@ -121,11 +137,40 @@ impl ForegroundSubagentRunner {
         cancel: CancellationToken,
         to_parent: &mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
-        let session_config = prepare_subagent(&self.services, subagent).await?;
-        let mut events = self
-            .services
-            .run_subagent_turn(session_config, cancel)
-            .await?;
+        let mut session = subagent.clone();
+        let mut continued = false;
+        loop {
+            let model = subagent_model(&session);
+            let session_config = prepare_subagent(&self.services, &session).await?;
+            let events = self
+                .services
+                .run_subagent_turn(session_config, cancel.clone(), continued)
+                .await?;
+            self.forward(events, subagent, parent_id, to_parent).await?;
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            session = self.load(&subagent.id).await?;
+            let finished = session
+                .conversation
+                .as_ref()
+                .and_then(|conversation| messages_since_kickoff(conversation).ok())
+                .and_then(FinalOutputTool::successful_output)
+                .is_some();
+            if finished || subagent_model(&session) == model {
+                return Ok(());
+            }
+            continued = true;
+        }
+    }
+
+    async fn forward(
+        &self,
+        mut events: BoxStream<'static, Result<AgentEvent>>,
+        subagent: &Session,
+        parent_id: &str,
+        to_parent: &mpsc::UnboundedSender<Message>,
+    ) -> Result<()> {
         while let Some(event) = events.next().await {
             let event = event?;
             if let AgentEvent::Message(message) = &event {
@@ -175,7 +220,10 @@ impl ForegroundSubagentRunner {
             ending.finished = true;
             return SubagentOutcome::Failed(format!("subagent {} is already running", subagent.id));
         }
-        ending.publish(SubagentLiveUpdate::Started { run_id });
+        ending.publish(SubagentLiveUpdate::Started {
+            run_id,
+            model: subagent_model(&subagent),
+        });
         let outcome = self
             .run_registered(&subagent, &ending.parent_id, cancel, &to_parent)
             .await;

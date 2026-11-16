@@ -1,8 +1,10 @@
 use crate::agents::extension::PlatformExtensionContext;
-use crate::agents::final_output_tool::FinalOutputTool;
+use crate::agents::final_output_tool::{FinalOutputTool, FINAL_OUTPUT_TOOL_NAME};
 use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::state_machine::DELEGATED_META_KEY;
+use crate::agents::subagent_coordination::{ASK_PARENT_TOOL_NAME, STEER_SUBAGENT_TOOL_NAME};
 use crate::agents::tool_execution::ToolCallContext;
+use crate::agents::StateMachineServices;
 use crate::config::paths::Paths;
 use crate::config::{resolve_extensions_for_new_session, Config, GooseMode};
 use crate::conversation::message::Message;
@@ -19,11 +21,12 @@ use async_trait::async_trait;
 use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, InitializeResult, JsonObject, ListToolsResult,
-    MetaObject, ServerCapabilities, Tool,
+    MetaObject, ServerCapabilities, Tool, ToolAnnotations,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +61,30 @@ pub struct DelegateParams {
 }
 
 const DEFAULT_RESUME_INSTRUCTIONS: &str = "Continue the task from where you left off.";
+
+#[derive(Debug, Deserialize)]
+struct SteerSubagentParams {
+    session_id: String,
+    message: Option<String>,
+    #[serde(default)]
+    wrap_up: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AskParentParams {
+    question: String,
+}
+
+fn wrap_up_instruction() -> String {
+    format!(
+        "Wrap up now. Start no new work and call `{FINAL_OUTPUT_TOOL_NAME}` with your best \
+         result so far, saying what is unfinished."
+    )
+}
+
+fn text_result(text: String) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(text)])
+}
 
 struct SubagentConfig {
     provider_name: String,
@@ -537,12 +564,187 @@ impl SummonClient {
              Effective Delegation:\n\
              - Delegates know only instructions + source content\n\
              - Delegates cannot coordinate. Same-file work = conflicts.\n\
-             - You get a delegate's result back once it finishes.\n\n\
+             - You get a delegate's result back once it finishes. While it runs you can message it with steer_subagent.\n\n\
              Research (read-only): delegates explore and report back.\n\
              Work (writes): partition files strictly - no two delegates touch the same file."
                 .to_string(),
             schema.as_object().unwrap().clone(),
         )
+    }
+
+    fn create_steer_subagent_tool(&self) -> Tool {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["session_id"],
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Subagent ID of a delegate that is still running."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What to tell the subagent. When it is waiting on ask_parent, this is your answer."
+                },
+                "wrap_up": {
+                    "type": "boolean",
+                    "description": "Tell the subagent to stop and report its best result so far. Combine with `message` to add a note."
+                }
+            }
+        });
+
+        Tool::new(
+            STEER_SUBAGENT_TOOL_NAME,
+            "Send a message to a running subagent, answer its question, or tell it to wrap up.\n\n\
+             The subagent reads the message before its next step and keeps its context. With \
+             `wrap_up: true` it stops and reports what it has; that result counts as completed. \
+             Its result still reaches you when it finishes. For a subagent that already \
+             finished, use delegate with `resume` instead."
+                .to_string(),
+            schema.as_object().unwrap().clone(),
+        )
+        .annotate(
+            ToolAnnotations::with_title("Steer a subagent".to_string())
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        )
+    }
+
+    fn create_ask_parent_tool(&self) -> Tool {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["question"],
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question, with the context the parent needs to answer it."
+                }
+            }
+        });
+
+        Tool::new(
+            ASK_PARENT_TOOL_NAME,
+            "Ask the agent that delegated this task a question and wait for its answer.\n\n\
+             Use it when you cannot continue well without a decision or information you do not \
+             have. The answer is this tool's result. Ask one question at a time."
+                .to_string(),
+            schema.as_object().unwrap().clone(),
+        )
+        .annotate(
+            ToolAnnotations::with_title("Ask the parent agent".to_string())
+                .read_only(true)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        )
+    }
+
+    fn services(&self) -> Result<Arc<StateMachineServices>, String> {
+        self.context
+            .extension_manager
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .and_then(|manager| manager.services())
+            .ok_or_else(|| "Subagent coordination is not available in this session".to_string())
+    }
+
+    async fn handle_steer_subagent(
+        &self,
+        parent_id: &str,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, String> {
+        let params: SteerSubagentParams =
+            serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+                .map_err(|e| format!("Invalid parameters: {e}"))?;
+        let subagent_id = params.session_id;
+        let message = params.message.filter(|text| !text.trim().is_empty());
+        let text = match (params.wrap_up, message) {
+            (true, Some(message)) => format!("{}\n\n{message}", wrap_up_instruction()),
+            (true, None) => wrap_up_instruction(),
+            (false, Some(message)) => message,
+            (false, None) => return Err("Provide `message`, `wrap_up: true`, or both".to_string()),
+        };
+        let services = self.services()?;
+        if services
+            .subagent_events
+            .running_parent_of(&subagent_id)
+            .as_deref()
+            != Some(parent_id)
+        {
+            return Err(format!(
+                "Subagent {subagent_id} is not running in this session. To give a finished \
+                 subagent more work, call delegate with `resume: \"{subagent_id}\"` and \
+                 `instructions`"
+            ));
+        }
+        if services
+            .subagent_coordination
+            .answer(&subagent_id, text.clone())
+        {
+            return Ok(text_result(format!(
+                "Answered subagent {subagent_id}'s question."
+            )));
+        }
+        services
+            .steer(
+                &subagent_id,
+                Message::user().with_text(format!("Message from the parent agent: {text}")),
+            )
+            .await
+            .map_err(|e| format!("Failed to steer subagent {subagent_id}: {e}"))?;
+        Ok(text_result(if params.wrap_up {
+            format!(
+                "Told subagent {subagent_id} to wrap up. Its result reaches you when it finishes."
+            )
+        } else {
+            format!("Sent to subagent {subagent_id}. It reads the message before its next step.")
+        }))
+    }
+
+    async fn handle_ask_parent(
+        &self,
+        subagent_id: &str,
+        arguments: Option<JsonObject>,
+        cancellation_token: CancellationToken,
+    ) -> Result<CallToolResult, String> {
+        let params: AskParentParams =
+            serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+                .map_err(|e| format!("Invalid parameters: {e}"))?;
+        let question = params.question.trim();
+        if question.is_empty() {
+            return Err("`question` must not be empty".to_string());
+        }
+        let services = self.services()?;
+        let parent_id = services
+            .subagent_events
+            .running_parent_of(subagent_id)
+            .ok_or_else(|| "There is no parent waiting on this task to ask".to_string())?;
+        let mut pending = services
+            .subagent_coordination
+            .ask(subagent_id, &parent_id, question)
+            .map_err(|e| e.to_string())?;
+        services
+            .runtime
+            .steer(
+                &parent_id,
+                Message::user()
+                    .with_text(format!(
+                        "Subagent {subagent_id} asks: {question}\n\nIt waits for your answer: \
+                         call {STEER_SUBAGENT_TOOL_NAME}(session_id: \"{subagent_id}\", \
+                         message: <your answer>)."
+                    ))
+                    .agent_only(),
+            )
+            .await;
+        tokio::select! {
+            answer = pending.answer() => answer
+                .map(text_result)
+                .ok_or_else(|| "The parent did not answer. Continue with your best judgement".to_string()),
+            _ = cancellation_token.cancelled() => {
+                Err("Stopped while waiting for the parent's answer".to_string())
+            }
+        }
     }
 
     fn working_dir(&self, ctx: &ToolCallContext) -> PathBuf {
@@ -889,6 +1091,16 @@ impl SummonClient {
         instructions: Option<String>,
         parent_id: &str,
     ) -> Result<CallToolResult, String> {
+        if self.services().is_ok_and(|services| {
+            services
+                .subagent_events
+                .running_parent_of(subagent_id)
+                .is_some()
+        }) {
+            return Err(format!(
+                "Subagent {subagent_id} is still running; send it a message with {STEER_SUBAGENT_TOOL_NAME}"
+            ));
+        }
         let session_manager = &self.context.session_manager;
         let subagent = session_manager
             .get_session(subagent_id, true)
@@ -1457,8 +1669,11 @@ impl McpClientTrait for SummonClient {
 
         let mut tools = vec![self.create_load_tool()];
 
-        if !is_subagent {
+        if is_subagent {
+            tools.push(self.create_ask_parent_tool());
+        } else {
             tools.push(self.create_delegate_tool());
+            tools.push(self.create_steer_subagent_tool());
         }
 
         Ok(ListToolsResult {
@@ -1474,11 +1689,22 @@ impl McpClientTrait for SummonClient {
         ctx: &ToolCallContext,
         name: &str,
         arguments: Option<JsonObject>,
-        _cancellation_token: CancellationToken,
+        cancellation_token: CancellationToken,
     ) -> Result<CallToolResult, Error> {
         let session_id = &ctx.session_id;
         let working_dir = self.working_dir(ctx);
+        let error_result = |error: String| {
+            CallToolResult::error(vec![ContentBlock::text(format!("Error: {error}"))])
+        };
         match name {
+            STEER_SUBAGENT_TOOL_NAME => Ok(self
+                .handle_steer_subagent(session_id, arguments)
+                .await
+                .unwrap_or_else(error_result)),
+            ASK_PARENT_TOOL_NAME => Ok(self
+                .handle_ask_parent(session_id, arguments, cancellation_token)
+                .await
+                .unwrap_or_else(error_result)),
             "load" => match self.handle_load(session_id, &working_dir, arguments).await {
                 Ok(result) => Ok(result),
                 Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(

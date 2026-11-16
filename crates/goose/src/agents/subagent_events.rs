@@ -6,8 +6,21 @@ use tokio::sync::mpsc;
 
 use super::AgentEvent;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubagentModel {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 pub(crate) enum SubagentLiveUpdate {
-    Started { run_id: String },
+    Started {
+        run_id: String,
+        model: SubagentModel,
+    },
+    ModelChanged {
+        run_id: String,
+        model: SubagentModel,
+    },
     Event(Box<AgentEvent>),
     Finished(SubagentOutcome),
 }
@@ -66,7 +79,7 @@ impl SubagentEventHub {
             SubagentLiveUpdate::Finished(_) => {
                 state.running_parents.remove(&event.subagent_session_id);
             }
-            SubagentLiveUpdate::Event(_) => {}
+            SubagentLiveUpdate::ModelChanged { .. } | SubagentLiveUpdate::Event(_) => {}
         }
         let event = Arc::new(event);
         let mut ancestor = Some(event.parent_session_id.as_str());
@@ -83,6 +96,29 @@ impl SubagentEventHub {
             }
             ancestor = state.running_parents.get(session_id).map(String::as_str);
         }
+    }
+
+    pub(crate) fn running_parent_of(&self, subagent_session_id: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("subagent event hub poisoned")
+            .running_parents
+            .get(subagent_session_id)
+            .cloned()
+    }
+
+    pub(crate) fn running_subagents_of(&self, parent_session_id: &str) -> Vec<String> {
+        let mut running: Vec<String> = self
+            .state
+            .lock()
+            .expect("subagent event hub poisoned")
+            .running_parents
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == parent_session_id)
+            .map(|(subagent, _)| subagent.clone())
+            .collect();
+        running.sort_unstable();
+        running
     }
 
     fn unsubscribe(&self, parent_session_id: &str, id: u64) {
@@ -146,6 +182,7 @@ mod tests {
     fn started(run_id: &str) -> SubagentLiveUpdate {
         SubagentLiveUpdate::Started {
             run_id: run_id.to_string(),
+            model: SubagentModel::default(),
         }
     }
 
@@ -196,5 +233,24 @@ mod tests {
         ));
 
         assert_eq!(received(&mut root), ["child", "grandchild", "child"]);
+    }
+
+    #[test]
+    fn running_subagents_are_known_until_they_finish() {
+        let hub = Arc::new(SubagentEventHub::default());
+        hub.publish(event("beta", "parent", started("run-1")));
+        hub.publish(event("alpha", "parent", started("run-2")));
+        hub.publish(event("other", "elsewhere", started("run-3")));
+
+        assert_eq!(hub.running_subagents_of("parent"), ["alpha", "beta"]);
+        assert_eq!(hub.running_parent_of("alpha").as_deref(), Some("parent"));
+
+        hub.publish(event(
+            "alpha",
+            "parent",
+            SubagentLiveUpdate::Finished(SubagentOutcome::Cancelled),
+        ));
+        assert_eq!(hub.running_subagents_of("parent"), ["beta"]);
+        assert_eq!(hub.running_parent_of("alpha"), None);
     }
 }

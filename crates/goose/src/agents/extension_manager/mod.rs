@@ -460,6 +460,7 @@ pub struct ExtensionManager {
     context: PlatformExtensionContext,
     default_client: Arc<ClientContext>,
     clients: std::sync::Mutex<HashMap<String, Arc<ClientContext>>>,
+    services: std::sync::OnceLock<std::sync::Weak<crate::agents::StateMachineServices>>,
 }
 
 /// A flattened representation of a resource used by the agent to prepare inference
@@ -691,7 +692,22 @@ impl ExtensionManager {
             },
             default_client: Arc::new(default_client),
             clients: std::sync::Mutex::new(HashMap::new()),
+            services: std::sync::OnceLock::new(),
         }
+    }
+
+    pub(crate) fn set_services(
+        &self,
+        services: std::sync::Weak<crate::agents::StateMachineServices>,
+    ) {
+        self.services
+            .set(services)
+            .unwrap_or_else(|_| panic!("extension manager services already set"));
+    }
+
+    /// The services running this manager's sessions, for platform extensions that act on runs.
+    pub(crate) fn services(&self) -> Option<Arc<crate::agents::StateMachineServices>> {
+        self.services.get().and_then(std::sync::Weak::upgrade)
     }
 
     pub fn with_data_dir(data_dir: std::path::PathBuf) -> Self {

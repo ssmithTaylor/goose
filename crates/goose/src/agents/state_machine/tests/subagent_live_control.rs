@@ -15,7 +15,7 @@ use crate::agents::subagent_events::{SubagentEvents, SubagentLiveEvent, Subagent
 use crate::agents::{AgentEvent, SessionConfig, StateMachineServices};
 use crate::conversation::message::{Message, MessageContent};
 
-fn reply_task(
+pub(super) fn reply_task(
     services: &Arc<StateMachineServices>,
     session_id: &str,
     text: &str,
@@ -47,19 +47,19 @@ fn reply_task(
     })
 }
 
-fn delegate(instructions: &str) -> serde_json::Value {
+pub(super) fn delegate(instructions: &str) -> serde_json::Value {
     json!({ "instructions": instructions, "max_turns": 4 })
 }
 
-fn drain(events: &mut SubagentEvents) -> Vec<Arc<SubagentLiveEvent>> {
+pub(super) fn drain(events: &mut SubagentEvents) -> Vec<Arc<SubagentLiveEvent>> {
     std::iter::from_fn(|| events.try_recv()).collect()
 }
 
-fn started_runs(events: &[Arc<SubagentLiveEvent>]) -> Vec<(String, String)> {
+pub(super) fn started_runs(events: &[Arc<SubagentLiveEvent>]) -> Vec<(String, String)> {
     events
         .iter()
         .filter_map(|event| match &event.update {
-            SubagentLiveUpdate::Started { run_id } => {
+            SubagentLiveUpdate::Started { run_id, .. } => {
                 Some((event.subagent_session_id.clone(), run_id.clone()))
             }
             _ => None,
@@ -67,7 +67,7 @@ fn started_runs(events: &[Arc<SubagentLiveEvent>]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn outcome_of(events: &[Arc<SubagentLiveEvent>], subagent_id: &str) -> SubagentOutcome {
+pub(super) fn outcome_of(events: &[Arc<SubagentLiveEvent>], subagent_id: &str) -> SubagentOutcome {
     let outcomes: Vec<_> = events
         .iter()
         .filter(|event| event.subagent_session_id == subagent_id)
@@ -98,7 +98,7 @@ fn live_messages<'a>(
         })
 }
 
-async fn subagent_for(
+pub(super) async fn subagent_for(
     services: &StateMachineServices,
     runs: &[(String, String)],
     task: &str,
@@ -120,7 +120,7 @@ async fn subagent_for(
     anyhow::bail!("no subagent runs {task}")
 }
 
-async fn last_text(services: &StateMachineServices, session_id: &str) -> Result<String> {
+pub(super) async fn last_text(services: &StateMachineServices, session_id: &str) -> Result<String> {
     let session = services
         .session_manager
         .get_session(session_id, true)
@@ -131,7 +131,7 @@ async fn last_text(services: &StateMachineServices, session_id: &str) -> Result<
         .unwrap_or_default())
 }
 
-fn notices(messages: &[Message]) -> Vec<String> {
+pub(super) fn notices(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .flat_map(|message| &message.content)
@@ -145,7 +145,7 @@ fn notices(messages: &[Message]) -> Vec<String> {
 /// Long enough that a subagent still waiting on it can only end by being stopped.
 const UNANSWERED: Duration = Duration::from_secs(60);
 
-async fn record_until(
+pub(super) async fn record_until(
     events: &mut SubagentEvents,
     seen: &mut Vec<Arc<SubagentLiveEvent>>,
     done: impl Fn(&[Arc<SubagentLiveEvent>]) -> bool,
@@ -159,7 +159,7 @@ async fn record_until(
     .expect("timed out waiting for subagent events");
 }
 
-fn finished(events: &[Arc<SubagentLiveEvent>], subagent_id: &str) -> bool {
+pub(super) fn finished(events: &[Arc<SubagentLiveEvent>], subagent_id: &str) -> bool {
     events.iter().any(|event| {
         event.subagent_session_id == subagent_id
             && matches!(event.update, SubagentLiveUpdate::Finished(_))

@@ -21,9 +21,9 @@ use crate::agents::state_machine::{
     FinalOutputOperation, GooseEffect, GooseInferenceProvider, GooseInferenceRequestPreparer,
     GooseToolApproval, InferenceRunner, Operation, ProjectOperation, RecipeOperation,
     RemainingToolCallsOperation, RetryOperation, SkillOperation, SlashCommandOperation,
-    StateMachine, StatusOperation, Step, StopHookOperation, SubagentOperation,
-    ToolApprovalOperation, ToolExecutionOperation, ToolPairCompactionOperation,
-    UnhandledToolCallsOperation,
+    StateMachine, StatusOperation, Step, StopHookOperation, SubagentCoordinationOperation,
+    SubagentModelSwitchOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
+    ToolPairCompactionOperation, UnhandledToolCallsOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
@@ -48,6 +48,7 @@ pub(crate) struct StateMachineConfig<'a> {
     pub(crate) tool_inspection_manager: &'a ToolInspectionManager,
     pub(crate) hook_manager: HookManager,
     pub(crate) steer_queue: SteerQueue,
+    pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) subagent_runner: ForegroundSubagentRunner,
     pub(crate) retry_timeout: Duration,
     pub(crate) on_failure_timeout: Duration,
@@ -113,6 +114,7 @@ pub(crate) fn build_state_machine(
         tool_inspection_manager,
         hook_manager,
         steer_queue,
+        wake,
         subagent_runner,
         retry_timeout,
         on_failure_timeout,
@@ -123,12 +125,16 @@ pub(crate) fn build_state_machine(
         context_relevance,
     } = config;
     let manages_own_context = provider.manages_own_context();
+    let services = Arc::clone(subagent_runner.services());
 
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
         Arc::new(FinalOutputOperation::new(provider.clone())),
         Arc::new(
-            ToolApprovalOperation::new(Arc::new(GooseToolApproval::new(tool_inspection_manager)))
-                .with_declined_message(DECLINED_RESPONSE),
+            ToolApprovalOperation::new(Arc::new(GooseToolApproval::new(
+                tool_inspection_manager,
+                Arc::clone(&services.subagent_events),
+            )))
+            .with_declined_message(DECLINED_RESPONSE),
         ),
         Arc::new(SkillOperation::new(
             Arc::clone(&extension_lease),
@@ -148,13 +154,19 @@ pub(crate) fn build_state_machine(
         )),
         Arc::new(UnhandledToolCallsOperation::new()),
         Arc::new(
-            SubagentOperation::new(Arc::new(subagent_runner)).with_max_concurrency(
-                Config::global()
-                    .get_param::<NonZeroUsize>("GOOSE_MAX_CONCURRENT_SUBAGENTS")
-                    .unwrap_or(NonZeroUsize::new(5).unwrap()),
-            ),
+            SubagentOperation::new(Arc::new(subagent_runner))
+                .with_max_concurrency(
+                    Config::global()
+                        .get_param::<NonZeroUsize>("GOOSE_MAX_CONCURRENT_SUBAGENTS")
+                        .unwrap_or(NonZeroUsize::new(5).unwrap()),
+                )
+                .with_wake(wake, steer_queue.clone()),
         ),
         Arc::new(SteerOperation::new(steer_queue)),
+        Arc::new(SubagentCoordinationOperation::new(
+            Arc::clone(&services.subagent_events),
+            Arc::clone(&services.subagent_coordination),
+        )),
         Arc::new(BangCommandOperation::new("shell", "command")),
     ];
     if !manages_own_context {
@@ -190,11 +202,13 @@ pub(crate) fn build_state_machine(
     ];
     operations.extend(remaining_operations);
     operations.extend(extra_operations);
+    operations.push(Arc::new(SubagentModelSwitchOperation::default()));
     let request_preparer = GooseInferenceRequestPreparer {
         extension_manager,
         extension_lease,
         tool_inspection_manager,
         context_limit,
+        subagent_events: Arc::clone(&services.subagent_events),
     };
     let inference_provider = Arc::new(GooseInferenceProvider::new(provider));
     let inference = Arc::new(
