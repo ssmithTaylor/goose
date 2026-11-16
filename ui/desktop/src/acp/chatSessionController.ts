@@ -1,5 +1,7 @@
 import { v7 as uuidv7 } from 'uuid';
 import type { GooseExtension } from '@aaif/goose-acp-client';
+import type { SessionInfo } from '@agentclientprotocol/sdk';
+import { getGooseActiveRunId, getGooseParentSessionId } from './adapter/shared';
 import { AppEvents } from '../constants/events';
 import { ChatState } from '../types/chatState';
 import type { Session } from '../types/session';
@@ -27,7 +29,7 @@ import { cancelAcpPermissionRequestsForSession } from './permissionRequests';
 import { acpCancelPrompt, acpPromptSession, acpSteerSession } from './prompt';
 import {
   acpForkSession,
-  acpGetSession,
+  acpGetSessionInfo,
   acpLoadSession,
   acpNewSession,
   acpTruncateSessionConversation,
@@ -170,7 +172,9 @@ async function attachLiveSubagentSession(
   options: AcpLoadSessionOptions
 ): Promise<void> {
   try {
-    acpChatSessionActions.setSessionMetadata(sessionId, await acpGetSession(sessionId));
+    const sessionInfo = await acpGetSessionInfo(sessionId);
+    acpChatSessionActions.setSessionMetadata(sessionId, sessionInfoToSession(sessionInfo));
+    restoreSubagentRun(sessionId, sessionInfo);
     options.onSessionLoaded?.();
   } catch (error) {
     console.error('Failed to load ACP subagent session info:', error);
@@ -197,12 +201,34 @@ async function loadSessionFromServer(
     window.dispatchEvent(
       new CustomEvent(AppEvents.SESSION_EXTENSIONS_LOADED, { detail: { sessionId } })
     );
-    acpChatSessionActions.finishSessionLoad(sessionId, sessionInfoToSession(sessionInfo, meta));
+    const session = sessionInfoToSession(sessionInfo, meta);
+    acpChatSessionActions.finishSessionLoad(sessionId, session);
+    if (session.session_type === 'sub_agent') {
+      restoreSubagentRun(sessionId, await acpGetSessionInfo(sessionId));
+    }
     options.onSessionLoaded?.();
   } catch (error) {
     console.error('Failed to load ACP session:', error);
     acpChatSessionActions.failSessionLoad(sessionId, formatAcpError(error));
   }
+}
+
+// Only session/info reports a run in flight, so after a reload or reconnect this
+// is what restores a running subagent's controls and its link back to the parent.
+function restoreSubagentRun(sessionId: string, sessionInfo: SessionInfo): void {
+  const parentSessionId = getGooseParentSessionId(sessionInfo);
+  if (!parentSessionId) {
+    return;
+  }
+  const activeRunId = getGooseActiveRunId(sessionInfo);
+  const goose: Record<string, unknown> = { parentSessionId };
+  if (typeof activeRunId === 'string') {
+    goose.activeRunId = activeRunId;
+  }
+  acpChatSessionActions.applyAcpSessionNotification({
+    sessionId,
+    update: { sessionUpdate: 'session_info_update', _meta: { goose } },
+  });
 }
 
 async function submitMessage(

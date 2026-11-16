@@ -10,6 +10,7 @@ import {
 } from '../chatSessionStore';
 import { acpCancelPrompt, acpPromptSession } from '../prompt';
 import {
+  acpGetSessionInfo,
   acpLoadSession,
   acpTruncateSessionConversation,
   isAcpSessionLoadInFlight,
@@ -28,6 +29,7 @@ vi.mock('../chatSessionStore', () => ({
     startSessionLoad: vi.fn(),
     finishSessionLoad: vi.fn(),
     failSessionLoad: vi.fn(),
+    applyAcpSessionNotification: vi.fn(),
     startPromptAttempt: vi.fn(),
     finishPromptAttemptIfCurrent: vi.fn(),
     isCurrentPromptAttempt: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock('../chatSessionStore', () => ({
 }));
 
 vi.mock('../sessions', () => ({
+  acpGetSessionInfo: vi.fn(),
   acpLoadSession: vi.fn(),
   isAcpSessionLoadInFlight: vi.fn(),
   sessionInfoToSession: vi.fn(),
@@ -159,6 +162,62 @@ describe('acpChatSessionController.loadSession', () => {
       SESSION_ID,
       loadedSession()
     );
+  });
+
+  it('restores a running subagent and its parent link from session info after a reload', async () => {
+    vi.mocked(isAcpSessionLoadInFlight).mockReturnValue(false);
+    vi.mocked(sessionInfoToSession).mockReturnValue({
+      ...loadedSession(),
+      session_type: 'sub_agent',
+    } as Session);
+    vi.mocked(acpGetSessionInfo).mockResolvedValue({
+      sessionId: SESSION_ID,
+      cwd: '/tmp',
+      _meta: { goose: { parentSessionId: 'parent-1', activeRunId: 'subagent_1' } },
+    });
+
+    await acpChatSessionController.loadSession(SESSION_ID);
+
+    expect(acpGetSessionInfo).toHaveBeenCalledWith(SESSION_ID);
+    expect(acpChatSessionActions.applyAcpSessionNotification).toHaveBeenCalledWith({
+      sessionId: SESSION_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: { goose: { parentSessionId: 'parent-1', activeRunId: 'subagent_1' } },
+      },
+    });
+  });
+
+  it('links a finished subagent to its parent without marking it running', async () => {
+    vi.mocked(isAcpSessionLoadInFlight).mockReturnValue(false);
+    vi.mocked(sessionInfoToSession).mockReturnValue({
+      ...loadedSession(),
+      session_type: 'sub_agent',
+    } as Session);
+    vi.mocked(acpGetSessionInfo).mockResolvedValue({
+      sessionId: SESSION_ID,
+      cwd: '/tmp',
+      _meta: { goose: { parentSessionId: 'parent-1', activeRunId: null } },
+    });
+
+    await acpChatSessionController.loadSession(SESSION_ID);
+
+    expect(acpChatSessionActions.applyAcpSessionNotification).toHaveBeenCalledWith({
+      sessionId: SESSION_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: { goose: { parentSessionId: 'parent-1' } },
+      },
+    });
+  });
+
+  it('does not ask for session info when loading a normal session', async () => {
+    vi.mocked(isAcpSessionLoadInFlight).mockReturnValue(false);
+
+    await acpChatSessionController.loadSession(SESSION_ID);
+
+    expect(acpGetSessionInfo).not.toHaveBeenCalled();
+    expect(acpChatSessionActions.applyAcpSessionNotification).not.toHaveBeenCalled();
   });
 
   it('does not reset replay state when joining an in-flight session load', async () => {
