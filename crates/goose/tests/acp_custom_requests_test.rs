@@ -781,6 +781,32 @@ fn test_steer_session_adds_input_to_active_prompt() {
             picked_up_ids.contains(&steer_message_id),
             "picked-up steer chunk must carry the queued messageId {steer_message_id:?} for correlation, got: {picked_up_ids:?}"
         );
+        // The client appends each delivered chunk of a steer, so it goes out exactly once,
+        // and only after the queuedSteer announcement.
+        assert_eq!(
+            picked_up_ids
+                .iter()
+                .filter(|id| **id == steer_message_id)
+                .count(),
+            1,
+            "steer chunk must be sent once, got: {picked_up_ids:?}"
+        );
+        let queued_at = updates
+            .iter()
+            .position(|update| {
+                queued_steer_message_ids(std::slice::from_ref(update)).contains(&steer_message_id)
+            })
+            .expect("queuedSteer update");
+        let echoed_at = updates
+            .iter()
+            .position(|update| {
+                steer_chunk_message_ids(std::slice::from_ref(update)).contains(&steer_message_id)
+            })
+            .expect("steer chunk");
+        assert!(
+            queued_at < echoed_at,
+            "queuedSteer must precede the picked-up chunk (queued at {queued_at}, echoed at {echoed_at})"
+        );
     });
 }
 

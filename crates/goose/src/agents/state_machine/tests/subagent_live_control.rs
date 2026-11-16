@@ -335,11 +335,13 @@ async fn a_steer_reaches_the_running_subagent_and_shows_in_its_transcript() -> R
         outcome_of(&events, gamma_id),
         SubagentOutcome::Completed(output) if output.contains("gamma done")
     ));
-    assert!(
-        live_messages(&events, gamma_id).any(|message| message.metadata.steer
-            && message.id.as_deref() == Some("steer_gamma")
-            && message.as_concat_text() == "also check the docs")
-    );
+    // Exactly once: the client appends every delivered chunk of a steer.
+    let steer_echoes: Vec<_> = live_messages(&events, gamma_id)
+        .filter(|message| message.id.as_deref() == Some("steer_gamma"))
+        .collect();
+    assert_eq!(steer_echoes.len(), 1, "steer echoed {steer_echoes:?}");
+    assert!(steer_echoes[0].metadata.steer);
+    assert_eq!(steer_echoes[0].as_concat_text(), "also check the docs");
     let subagent = services.session_manager.get_session(gamma_id, true).await?;
     assert!(subagent
         .conversation

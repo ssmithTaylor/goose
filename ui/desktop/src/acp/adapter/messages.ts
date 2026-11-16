@@ -80,6 +80,9 @@ export function applyContentChunk(
     };
     applyInferenceMeta(message, gooseMeta);
     state.messages.push(message);
+    if (gooseMeta.steer && role === 'user' && messageId && content.type === 'text') {
+      state.localSteerTextByMessageId.set(messageId, content.text);
+    }
   }
 
   return messagesChange(state);

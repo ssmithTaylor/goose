@@ -449,6 +449,107 @@ describe('acpChatSessionStore', () => {
     expect(cancellationSnapshot?.messages[0].id).toBe('steer-1');
   });
 
+  // The server announces a steer (queuedSteer) before it answers the steer request, and
+  // echoes the steer as a user chunk only when the run picks it up, which can be after the
+  // answer. Confirmation alone must not count as the echoed text.
+  it('shows a steer once when its echo arrives after queuedSteer and the steer response', () => {
+    const currentSessionId = sessionId('session-1');
+    const localSteerMessage = {
+      ...message('steer-1', 'more realistic'),
+      metadata: { userVisible: true, agentVisible: true, steer: true },
+    };
+
+    acpChatSessionActions.startPromptAttempt(currentSessionId, 'attempt-1');
+    acpChatSessionActions.applyAcpSessionNotification(
+      queuedSteerNotification(currentSessionId, 'steer-1')
+    );
+    acpChatSessionActions.addPendingLocalSteerMessage(currentSessionId, localSteerMessage);
+    const snapshot = acpChatSessionActions.applyAcpSessionNotification(
+      userSteerChunkNotification(currentSessionId, 'steer-1', 'more realistic')
+    );
+
+    expect(snapshot.messages).toHaveLength(1);
+    expect(snapshot.messages[0].content).toEqual([{ type: 'text', text: 'more realistic' }]);
+  });
+
+  it('shows a steer once when the adapter is rebuilt between queuedSteer and its echo', () => {
+    const currentSessionId = sessionId('session-1');
+    const firstSteerMessage = {
+      ...message('steer-1', 'more realistic'),
+      metadata: { userVisible: true, agentVisible: true, steer: true },
+    };
+    const secondSteerMessage = {
+      ...message('steer-2', 'second'),
+      metadata: { userVisible: true, agentVisible: true, steer: true },
+    };
+
+    acpChatSessionActions.startPromptAttempt(currentSessionId, 'attempt-1');
+    acpChatSessionActions.addPendingLocalSteerMessage(currentSessionId, firstSteerMessage);
+    acpChatSessionActions.applyAcpSessionNotification(
+      queuedSteerNotification(currentSessionId, 'steer-1')
+    );
+    acpChatSessionActions.addPendingLocalSteerMessage(currentSessionId, secondSteerMessage);
+    const snapshot = acpChatSessionActions.applyAcpSessionNotification(
+      userSteerChunkNotification(currentSessionId, 'steer-1', 'more realistic')
+    );
+
+    const firstMessage = snapshot.messages.find((item) => item.id === 'steer-1');
+    expect(firstMessage?.content).toEqual([{ type: 'text', text: 'more realistic' }]);
+  });
+
+  it('shows a subagent steer once when its echo arrives after queuedSteer and the response', () => {
+    const subagentSessionId = sessionId('subagent-1');
+    const parentMeta = { parentSessionId: 'parent-1' };
+    const withParent = (notification: SessionNotification): SessionNotification => {
+      const update = notification.update as { _meta?: { goose?: Record<string, unknown> } };
+      return {
+        ...notification,
+        update: {
+          ...notification.update,
+          _meta: { goose: { ...update._meta?.goose, ...parentMeta } },
+        } as SessionNotification['update'],
+      };
+    };
+    const localSteerMessage = {
+      ...message('steer-1', 'more realistic'),
+      metadata: { userVisible: true, agentVisible: true, steer: true },
+    };
+
+    acpChatSessionActions.applyAcpSessionNotification(
+      withParent(activeRunNotification(subagentSessionId, 'subagent-run-1'))
+    );
+    acpChatSessionActions.applyAcpSessionNotification(
+      queuedSteerNotification(subagentSessionId, 'steer-1')
+    );
+    acpChatSessionActions.addPendingLocalSteerMessage(subagentSessionId, localSteerMessage);
+    const snapshot = acpChatSessionActions.applyAcpSessionNotification(
+      withParent(userSteerChunkNotification(subagentSessionId, 'steer-1', 'more realistic'))
+    );
+
+    expect(snapshot.messages).toHaveLength(1);
+    expect(snapshot.messages[0].content).toEqual([{ type: 'text', text: 'more realistic' }]);
+  });
+
+  it('keeps accumulating steer chunks that arrived before the local steer was added', () => {
+    const currentSessionId = sessionId('session-1');
+    const secondSteerMessage = {
+      ...message('steer-2', 'second'),
+      metadata: { userVisible: true, agentVisible: true, steer: true },
+    };
+
+    acpChatSessionActions.startPromptAttempt(currentSessionId, 'attempt-1');
+    acpChatSessionActions.applyAcpSessionNotification(
+      userSteerChunkNotification(currentSessionId, 'steer-1', 'hel')
+    );
+    acpChatSessionActions.addPendingLocalSteerMessage(currentSessionId, secondSteerMessage);
+    const snapshot = acpChatSessionActions.applyAcpSessionNotification(
+      userSteerChunkNotification(currentSessionId, 'steer-1', 'lo')
+    );
+
+    const firstMessage = snapshot.messages.find((item) => item.id === 'steer-1');
+    expect(firstMessage?.content).toEqual([{ type: 'text', text: 'hello' }]);
+  });
+
   it('stores active run ids from session info notifications', () => {
     const currentSessionId = sessionId('session-1');
 

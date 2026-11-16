@@ -946,31 +946,19 @@ function discardPendingLocalSteerMessages(entry: StoreEntry): void {
 }
 
 function createAdapterForEntry(entry: StoreEntry): AcpSessionNotificationAdapter {
-  return createAcpSessionNotificationAdapter(
-    entry.messages,
-    confirmedLocalSteerTextByMessageId(entry)
-  );
+  return createAcpSessionNotificationAdapter(entry.messages, echoedSteerTextByMessageId(entry));
 }
 
-function confirmedLocalSteerTextByMessageId(entry: StoreEntry): Map<string, string> {
-  const textByMessageId = new Map<string, string>();
-
-  for (const message of entry.messages) {
-    if (
-      !message.id ||
-      !message.metadata.steer ||
-      entry.pendingLocalSteerMessageIds.has(message.id)
-    ) {
-      continue;
-    }
-
-    const firstContent = message.content[0];
-    if (firstContent?.type === 'text') {
-      textByMessageId.set(message.id, firstContent.text);
-    }
-  }
-
-  return textByMessageId;
+// Carries over only the steer text the server has echoed so far. A steer can be confirmed
+// (queuedSteer) before its echo arrives; seeding its local text would make the echo append to
+// it and show the message twice.
+function echoedSteerTextByMessageId(entry: StoreEntry): Map<string, string> {
+  const messageIds = new Set(entry.messages.map((message) => message.id).filter(Boolean));
+  return new Map(
+    [...entry.adapter.getLocalSteerTextByMessageId()].filter(([messageId]) =>
+      messageIds.has(messageId)
+    )
+  );
 }
 
 function snapshotFromEntry(entry: StoreEntry): AcpChatSessionSnapshot {
