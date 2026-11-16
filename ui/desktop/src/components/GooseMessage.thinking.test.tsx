@@ -77,6 +77,23 @@ describe('GooseMessage thinking block', () => {
     expect(screen.getByText(thought)).toBeInTheDocument();
   });
 
+  it('grows one block as thinking streams and marks it active until the answer starts', async () => {
+    await setShowThinking('always');
+    const partial: MessageContent = { type: 'thinking', thinking: 'Comparing', signature: '' };
+    const { rerender } = renderMessage([partial], true);
+
+    expect(await screen.findByText('Comparing')).toBeInTheDocument();
+    expect(screen.getByText('Thinking')).toHaveClass('animate-pulse');
+
+    rerender(messageElement([thinking], true));
+    expect(await screen.findByText(thought)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1);
+
+    rerender(messageElement([thinking, text], true));
+    expect(await screen.findByText(answer)).toBeInTheDocument();
+    expect(screen.getByText('Thinking')).not.toHaveClass('animate-pulse');
+  });
+
   it('is not shown when set to never', async () => {
     await setShowThinking('never');
     renderMessage([thinking, text], false);
