@@ -184,9 +184,13 @@ export async function acpGetSessionListItem(sessionId: string): Promise<SessionL
 }
 
 export async function acpGetSession(sessionId: string): Promise<Session> {
+  return sessionInfoToSession(await acpGetSessionInfo(sessionId));
+}
+
+export async function acpGetSessionInfo(sessionId: string): Promise<SessionInfo> {
   const client = await getAcpClient();
   const response = await client.goose.sessionInfo_unstable({ sessionId });
-  return sessionInfoToSession(response.session);
+  return response.session;
 }
 
 export async function acpLoadSession(sessionId: string): Promise<AcpLoadSessionResult> {
