@@ -67,6 +67,7 @@ struct ApiRule {
     response: ApiResponse,
     gate: Option<ResponseGate>,
     remaining: Option<usize>,
+    delay: Option<std::time::Duration>,
 }
 
 enum ApiMatcher {
@@ -271,6 +272,7 @@ impl DummyApi {
             response,
             gate: None,
             remaining: None,
+            delay: None,
         });
         rules.len() - 1
     }
@@ -281,6 +283,7 @@ impl DummyApi {
             response,
             gate: Some(gate),
             remaining: None,
+            delay: None,
         });
     }
 }
@@ -419,6 +422,12 @@ impl<'a> ApiRuleBuilder<'a> {
 }
 
 impl<'a> ConfiguredResponse<'a> {
+    /// Answers after `delay` without blocking the server, so other requests are still served.
+    pub(super) fn delayed(self, delay: std::time::Duration) -> Self {
+        self.api.state.rules.lock().unwrap()[self.rule].delay = Some(delay);
+        self
+    }
+
     pub(super) fn times(self, count: usize) -> Self {
         self.api.state.rules.lock().unwrap()[self.rule].remaining = Some(count);
         self
@@ -508,7 +517,7 @@ impl DummyApiState {
 
         let input = request_input(&body);
         let system = request_system(&body);
-        let (response, gate) = {
+        let (response, gate, delay) = {
             let mut rules = self.rules.lock().unwrap();
             let rule = rules
                 .iter_mut()
@@ -526,7 +535,7 @@ impl DummyApiState {
             if let Some(remaining) = &mut rule.remaining {
                 *remaining -= 1;
             }
-            (rule.response.clone(), rule.gate.clone())
+            (rule.response.clone(), rule.gate.clone(), rule.delay)
         };
         if let Some(gate) = gate {
             gate.block();
@@ -545,7 +554,7 @@ impl DummyApiState {
             cache_read_tokens: self.features.cache_read_tokens,
             cache_write_tokens: self.features.cache_write_tokens,
         };
-        match response {
+        let template = match response {
             ApiResponse::Reply(text) => sse_response(reply_events(
                 &meta(text.chars().count() as i64),
                 &text,
@@ -619,6 +628,10 @@ impl DummyApiState {
                 &reply,
                 Some(&error),
             )),
+        };
+        match delay {
+            Some(delay) => template.set_delay(delay),
+            None => template,
         }
     }
 }

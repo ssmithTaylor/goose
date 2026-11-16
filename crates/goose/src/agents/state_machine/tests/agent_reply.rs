@@ -32,7 +32,7 @@ use crate::providers::base::Provider;
 use crate::session::{SessionManager, SessionType};
 use goose_providers::model::ModelConfig;
 
-async fn agent_with_dummy_api() -> Result<(
+pub(super) async fn agent_with_dummy_api() -> Result<(
     Arc<StateMachineServices>,
     Arc<DummyApi>,
     String,
@@ -1542,7 +1542,7 @@ async fn cancelling_the_parent_ends_a_waiting_subagent() -> Result<()> {
     Ok(())
 }
 
-fn openai_env_for(api: &DummyApi) -> env_lock::EnvGuard<'static> {
+pub(super) fn openai_env_for(api: &DummyApi) -> env_lock::EnvGuard<'static> {
     env_lock::lock_env([
         ("OPENAI_API_KEY", Some("fake-openai-no-keyring".to_string())),
         ("OPENAI_HOST", Some(api.uri())),
@@ -1551,7 +1551,10 @@ fn openai_env_for(api: &DummyApi) -> env_lock::EnvGuard<'static> {
     ])
 }
 
-async fn enable_summon(services: &Arc<StateMachineServices>, session_id: &str) -> Result<()> {
+pub(super) async fn enable_summon(
+    services: &Arc<StateMachineServices>,
+    session_id: &str,
+) -> Result<()> {
     services
         .extension_manager
         .enable(

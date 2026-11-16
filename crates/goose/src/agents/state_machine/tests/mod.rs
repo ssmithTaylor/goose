@@ -22,6 +22,7 @@ mod provider_lifecycle;
 mod recipe_scheduling_lifecycle;
 mod reconstruction_isolation_lifecycle;
 mod steering_lifecycle;
+mod subagent_live_control;
 mod tool_lifecycle;
 
 async fn capture_state_machine_trace_fields(

@@ -1,7 +1,10 @@
 use crate::{
     agents::{
-        final_output_tool::FinalOutputTool, state_machine::messages_since_kickoff, AgentEvent,
-        SessionConfig, StateMachineServices,
+        final_output_tool::FinalOutputTool,
+        services::user_event,
+        state_machine::messages_since_kickoff,
+        subagent_events::{SubagentLiveEvent, SubagentLiveUpdate},
+        AgentEvent, SessionConfig, StateMachineServices,
     },
     conversation::message::{ActionRequiredData, Message, MessageContent},
     prompt_template::render_template,
@@ -19,6 +22,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
+use uuid::Uuid;
 
 #[derive(Serialize)]
 pub struct SubagentPromptContext {
@@ -99,37 +103,47 @@ impl ForegroundSubagentRunner {
     pub(crate) fn spawn(
         &self,
         subagent: Session,
-        cancel: CancellationToken,
+        parent_id: String,
+        parent_cancel: &CancellationToken,
     ) -> BoxStream<'static, SubagentUpdate> {
         let (to_parent, from_subagent) = mpsc::unbounded_channel();
-        spawn_run(self.clone().run(subagent, cancel, to_parent), from_subagent)
+        let cancel = parent_cancel.child_token();
+        spawn_run(
+            self.clone().run(subagent, parent_id, cancel, to_parent),
+            from_subagent,
+        )
     }
 
     async fn run_to_end(
         &self,
         subagent: &Session,
+        parent_id: &str,
         cancel: CancellationToken,
         to_parent: &mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
-        let parent_id = subagent
-            .parent_session_id
-            .as_deref()
-            .ok_or_else(|| anyhow!("Subagent {} has no parent", subagent.id))?;
         let session_config = prepare_subagent(&self.services, subagent).await?;
         let mut events = self
             .services
             .run_subagent_turn(session_config, cancel)
             .await?;
         while let Some(event) = events.next().await {
-            if let AgentEvent::Message(message) = event? {
-                if asks_for_a_decision(&message) {
+            let event = event?;
+            if let AgentEvent::Message(message) = &event {
+                if asks_for_a_decision(message) {
                     let _ = to_parent.send(forwarded(
-                        message,
+                        message.clone(),
                         parent_id,
                         &subagent.id,
                         self.session_manager(),
                     ));
                 }
+            }
+            if let Some(event) = user_event(event) {
+                self.services.subagent_events.publish(SubagentLiveEvent {
+                    subagent_session_id: subagent.id.clone(),
+                    parent_session_id: parent_id.to_string(),
+                    update: SubagentLiveUpdate::Event(Box::new(event)),
+                });
             }
         }
         Ok(())
@@ -138,16 +152,48 @@ impl ForegroundSubagentRunner {
     async fn run(
         self,
         subagent: Session,
+        parent_id: String,
         cancel: CancellationToken,
         to_parent: mpsc::UnboundedSender<Message>,
     ) -> SubagentOutcome {
-        let ending = SubagentEnding {
+        let run_id = format!("subagent_{}", Uuid::new_v4());
+        let mut ending = SubagentEnding {
             services: Arc::clone(&self.services),
             subagent_id: subagent.id.clone(),
+            parent_id,
+            run_id: run_id.clone(),
             ended: false,
+            finished: false,
         };
-        let run_result = self.run_to_end(&subagent, cancel.clone(), &to_parent).await;
+        let registered = self.services.runtime.runs.start_prompt_run(
+            &subagent.id,
+            run_id.clone(),
+            cancel.clone(),
+        );
+        if registered.is_err() {
+            ending.ended = true;
+            ending.finished = true;
+            return SubagentOutcome::Failed(format!("subagent {} is already running", subagent.id));
+        }
+        ending.publish(SubagentLiveUpdate::Started { run_id });
+        let outcome = self
+            .run_registered(&subagent, &ending.parent_id, cancel, &to_parent)
+            .await;
         ending.end().await;
+        ending.finish(outcome.clone());
+        outcome
+    }
+
+    async fn run_registered(
+        &self,
+        subagent: &Session,
+        parent_id: &str,
+        cancel: CancellationToken,
+        to_parent: &mpsc::UnboundedSender<Message>,
+    ) -> SubagentOutcome {
+        let run_result = self
+            .run_to_end(subagent, parent_id, cancel.clone(), to_parent)
+            .await;
         let stopped = cancel.is_cancelled();
         let subagent = match self.session_manager().get_session(&subagent.id, true).await {
             Ok(subagent) => subagent,
@@ -186,26 +232,54 @@ fn spawn_run(
     })
 }
 
-/// Aborting the parent's turn drops a running subagent's task, so the session is also ended
-/// from `Drop`.
+/// Aborting the parent's turn drops a running subagent's task, so the run is also unregistered,
+/// reported and ended from `Drop`.
 struct SubagentEnding {
     services: Arc<StateMachineServices>,
     subagent_id: String,
+    parent_id: String,
+    run_id: String,
     ended: bool,
+    finished: bool,
 }
 
 impl SubagentEnding {
-    async fn end(mut self) {
+    fn unregister(&self) {
+        self.services
+            .runtime
+            .runs
+            .remove_agent_run(&self.subagent_id, &self.run_id);
+    }
+
+    fn publish(&self, update: SubagentLiveUpdate) {
+        self.services.subagent_events.publish(SubagentLiveEvent {
+            subagent_session_id: self.subagent_id.clone(),
+            parent_session_id: self.parent_id.clone(),
+            update,
+        });
+    }
+
+    async fn end(&mut self) {
+        self.unregister();
         end_subagent(&self.services, &self.subagent_id).await;
         self.ended = true;
+    }
+
+    fn finish(&mut self, outcome: SubagentOutcome) {
+        self.publish(SubagentLiveUpdate::Finished(outcome));
+        self.finished = true;
     }
 }
 
 impl Drop for SubagentEnding {
     fn drop(&mut self) {
+        if !self.finished {
+            self.publish(SubagentLiveUpdate::Finished(SubagentOutcome::Cancelled));
+        }
         if self.ended {
             return;
         }
+        self.unregister();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
