@@ -1397,8 +1397,7 @@ async fn concurrent_subagents_get_their_own_answers_for_the_same_tool_call_id() 
             SessionConfig {
                 id: session_id.clone(),
                 schedule_id: None,
-                // The two results can arrive in one batch or two, so leave room for either.
-                max_turns: Some(5),
+                max_turns: Some(3),
             },
             None,
         )

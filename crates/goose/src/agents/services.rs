@@ -51,6 +51,7 @@ use rmcp::model::{ElicitationAction, Tool};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, instrument, warn};
 
 const AUTO_EFFORTS: [ThinkingEffort; 5] = [
@@ -1146,46 +1147,54 @@ impl StateMachineServices {
             crate::context_limit::get_context_limit(provider.as_ref(), &model_config.model_name)
                 .await?;
         let steer_queue = self.runtime.steer_queue(&session_id);
-        let machine = self
-            .create_state_machine(
-                provider,
-                model_config,
-                context_limit,
-                session_config,
-                cancel.clone(),
-                steer_queue,
-            )
-            .await;
         let reply_span = tracing::Span::current();
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let turn_events = TurnEvents::open(self, &session_id, tx.clone());
+
+        // The machine runs on its own task so that it never waits for the reply stream to be
+        // polled. A consumer that acts on an event before polling again (a subagent's request
+        // for a decision can arrive at any moment) would otherwise keep the machine suspended,
+        // possibly inside a session write that holds the database's write lock.
+        let services = Arc::clone(self);
+        let run_session_id = session_id.clone();
+        let run = async move {
+            let machine = services
+                .create_state_machine(
+                    provider,
+                    model_config,
+                    context_limit,
+                    session_config,
+                    cancel.clone(),
+                    steer_queue,
+                )
+                .await;
+            let emit = Emitter::new(tx, cancel);
+            crate::session_context::with_session_id(
+                Some(run_session_id.clone()),
+                run_goose(
+                    &machine,
+                    services.session_manager.as_ref(),
+                    &run_session_id,
+                    &emit,
+                ),
+            )
+            .await
+            .map(drop)
+        };
+        let mut run = AbortOnDropHandle::new(tokio::spawn(run.instrument(reply_span.clone())));
 
         Ok(Box::pin(
             async_stream::try_stream! {
-                let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-                let turn_events = TurnEvents::open(self, &session_id, tx.clone());
-                let emit = Emitter::new(tx, cancel.clone());
-                let result = {
-                    let run = crate::session_context::with_session_id(
-                        Some(session_id.clone()),
-                        run_goose(
-                            &machine,
-                            session_manager.as_ref(),
-                            &session_id,
-                            &emit,
-                        ),
-                    );
-                    tokio::pin!(run);
-                    loop {
-                        tokio::select! {
-                            biased;
-                            Some(event) = rx.recv() => yield event,
-                            result = &mut run => break result,
-                        }
+                let turn_events = turn_events;
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        Some(event) = rx.recv() => yield event,
+                        result = &mut run => break result,
                     }
                 };
                 drop(turn_events);
-                result?;
-                // Without this the drain below never ends: `run` only borrows the emitter.
-                drop(emit);
+                result.map_err(|error| anyhow!("state machine task failed: {error}"))??;
                 while let Some(event) = rx.recv().await {
                     yield event;
                 }

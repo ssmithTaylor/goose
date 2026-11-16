@@ -520,3 +520,88 @@ async fn a_finished_subagent_leaves_the_running_list() -> Result<()> {
     .await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_parent_keeps_running_while_its_client_holds_a_subagents_request() -> Result<()> {
+    let (services, api, session_id, _temp_dir) = agent_with_dummy_api().await?;
+    let _guard = openai_env_for(&api);
+    services
+        .session_manager
+        .update(&session_id)
+        .goose_mode(GooseMode::Approve)
+        .apply()
+        .await?;
+    super::agent_reply::enable_developer(&services, &session_id).await?;
+    enable_summon(&services, &session_id).await?;
+    services
+        .permission_manager
+        .update_user_permission("delegate", PermissionLevel::AlwaysAllow);
+    api.on("hand this off").call(
+        "delegate",
+        json!({ "instructions": "print the subagent marker", "max_turns": 3 }),
+    );
+    api.on("print the subagent marker")
+        .call("shell", json!({ "command": "echo marker-from-subagent" }));
+    api.on("marker-from-subagent")
+        .call(FINAL_OUTPUT_TOOL_NAME, json!({ "summary": "printed it" }));
+    api.on("Delegated to subagent")
+        .reply("my part is done")
+        .delayed(PARENT_BUSY);
+    api.on("printed it").reply("the subagent printed it");
+
+    let stream = services
+        .reply(
+            Message::user().with_text("hand this off"),
+            SessionConfig {
+                id: session_id.clone(),
+                schedule_id: None,
+                max_turns: Some(5),
+            },
+            None,
+        )
+        .await?;
+    tokio::pin!(stream);
+    let request_id = tokio::time::timeout(TURN_TIMEOUT, async {
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Message(message) = event? {
+                for content in &message.content {
+                    if let MessageContent::ActionRequired(action) = content {
+                        if let ActionRequiredData::ToolConfirmation { id, .. } = &action.data {
+                            return anyhow::Ok(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        anyhow::bail!("the turn ended without the subagent's request")
+    })
+    .await??;
+
+    wait_until(|| async {
+        conversation(&services, &session_id)
+            .await
+            .is_ok_and(|conversation| {
+                !messages_containing(&conversation, "my part is done").is_empty()
+            })
+    })
+    .await;
+    services
+        .submit_tool_confirmation(&session_id, &request_id, Permission::AllowOnce)
+        .await?;
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while let Some(event) = stream.next().await {
+            event?;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    assert_eq!(
+        conversation(&services, &session_id)
+            .await?
+            .last()
+            .map(Message::as_concat_text)
+            .as_deref(),
+        Some("the subagent printed it")
+    );
+    Ok(())
+}
