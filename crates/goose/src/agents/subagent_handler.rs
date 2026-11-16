@@ -4,6 +4,7 @@ use crate::{
         services::user_event,
         state_machine::messages_since_kickoff,
         subagent_events::{SubagentLiveEvent, SubagentLiveUpdate, SubagentModel},
+        subagent_routing::SubagentRoutingState,
         AgentEvent, SessionConfig, StateMachineServices,
     },
     conversation::message::{ActionRequiredData, Message, MessageContent},
@@ -83,12 +84,20 @@ pub(crate) async fn prepare_subagent(
 }
 
 pub(crate) fn subagent_model(session: &Session) -> SubagentModel {
+    let provider = session.provider_name.clone();
+    let model = session
+        .model_config
+        .as_ref()
+        .map(|model_config| model_config.model_name.clone());
+    let routing =
+        SubagentRoutingState::from_extension_data(&session.extension_data).filter(|state| {
+            provider.as_deref() == Some(state.provider.as_str())
+                && model.as_deref() == Some(state.model.as_str())
+        });
     SubagentModel {
-        provider: session.provider_name.clone(),
-        model: session
-            .model_config
-            .as_ref()
-            .map(|model_config| model_config.model_name.clone()),
+        provider,
+        model,
+        routing,
     }
 }
 

@@ -2407,6 +2407,15 @@ impl AcpConnection {
                     goose.insert(key.to_string(), value.clone().into());
                 }
             }
+            if let Some(routing) = &model.routing {
+                let mut decision = serde_json::Map::new();
+                decision.insert("capability".to_string(), routing.capability.clone().into());
+                decision.insert("tier".to_string(), routing.tier.as_str().into());
+                if let Some(reason) = &routing.reason {
+                    decision.insert("reason".to_string(), reason.clone().into());
+                }
+                goose.insert("routing".to_string(), decision.into());
+            }
         }
         meta
     }
@@ -4151,6 +4160,7 @@ print(\"hello, world\")
         use crate::agents::subagent_events::{
             SubagentLiveEvent, SubagentLiveUpdate, SubagentModel,
         };
+        use crate::agents::subagent_routing::{SubagentRoutingState, Tier};
         use goose_agent::subagent::SubagentOutcome;
 
         let root = tempfile::tempdir().unwrap();
@@ -4204,6 +4214,13 @@ print(\"hello, world\")
                             model: SubagentModel {
                                 provider: Some("openai".to_string()),
                                 model: Some("gpt-test".to_string()),
+                                routing: Some(SubagentRoutingState {
+                                    capability: "code".to_string(),
+                                    tier: Tier::Powerful,
+                                    reason: Some("multi-file refactor".to_string()),
+                                    provider: "openai".to_string(),
+                                    model: "gpt-test".to_string(),
+                                }),
                             },
                         });
                         for message in [
@@ -4292,6 +4309,15 @@ print(\"hello, world\")
                     assert_eq!(metas[0]["activeRunId"], "subagent_1");
                     assert_eq!(metas[0]["provider"], "openai");
                     assert_eq!(metas[0]["model"], "gpt-test");
+                    assert_eq!(
+                        metas[0]["routing"],
+                        serde_json::json!({
+                            "capability": "code",
+                            "tier": "powerful",
+                            "reason": "multi-file refactor"
+                        })
+                    );
+                    assert!(metas[5].get("routing").is_none());
                     assert!(matches!(
                         &received[1].update,
                         SessionUpdate::AgentMessageChunk(chunk)

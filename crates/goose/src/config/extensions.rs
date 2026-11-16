@@ -285,6 +285,7 @@ pub fn get_warnings() -> Vec<String> {
             ));
         }
     }
+    warnings.extend(crate::agents::subagent_routing::config_warnings());
     warnings
 }
 
