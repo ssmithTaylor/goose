@@ -1,8 +1,9 @@
 use crate::acp::custom_notifications::*;
 use crate::acp::custom_requests::*;
 pub(super) use crate::acp::response_builder::{
-    agent_thinking_effort_support, build_config_options, build_mode_state, build_model_state,
-    build_provider_options, build_session_info, build_session_setup_config,
+    active_run_meta, agent_thinking_effort_support, build_config_options, build_mode_state,
+    build_model_state, build_provider_options, build_session_info,
+    build_session_info_with_active_run, build_session_setup_config,
     send_session_setup_notifications, session_meta, session_provider_selection,
     session_response_meta, should_refresh_inventory_for_session_init,
 };
@@ -1965,20 +1966,6 @@ impl AcpConnection {
         Ok(active_run_id)
     }
 
-    fn active_run_meta(active_run_id: Option<&str>) -> Meta {
-        let mut goose = serde_json::Map::new();
-        goose.insert(
-            "activeRunId".to_string(),
-            active_run_id
-                .map(|run_id| serde_json::Value::String(run_id.to_string()))
-                .unwrap_or(serde_json::Value::Null),
-        );
-
-        let mut meta = serde_json::Map::new();
-        meta.insert("goose".to_string(), serde_json::Value::Object(goose));
-        meta
-    }
-
     fn send_active_run_update(
         cx: &ConnectionTo<Client>,
         session_id: &SessionId,
@@ -1987,7 +1974,7 @@ impl AcpConnection {
         cx.send_notification(SessionNotification::new(
             session_id.clone(),
             SessionUpdate::SessionInfoUpdate(
-                SessionInfoUpdate::new().meta(Self::active_run_meta(active_run_id)),
+                SessionInfoUpdate::new().meta(active_run_meta(active_run_id)),
             ),
         ))
     }
@@ -2408,7 +2395,7 @@ impl AcpConnection {
     }
 
     fn subagent_run_meta(run_id: Option<&str>, outcome: Option<&SubagentOutcome>) -> Meta {
-        let mut meta = Self::active_run_meta(run_id);
+        let mut meta = active_run_meta(run_id);
         if let (Some(outcome), Some(serde_json::Value::Object(goose))) =
             (outcome, meta.get_mut("goose"))
         {
@@ -2897,6 +2884,7 @@ mod tests {
     };
     use std::io::Write;
     use std::path::PathBuf;
+    use std::time::Duration;
     use tempfile::NamedTempFile;
     use test_case::test_case;
 
@@ -4068,6 +4056,13 @@ print(\"hello, world\")
             true,
             GoosePlatform::GooseCli,
         ));
+        connection_with_services(root, services).await
+    }
+
+    async fn connection_with_services(
+        root: &Path,
+        services: Arc<StateMachineServices>,
+    ) -> Arc<AcpConnection> {
         let live_voice = Arc::new(LiveVoiceService::from_config(services.runtime.runs.clone()));
         let provider_factory: AcpProviderFactory = Arc::new(|_provider_name| {
             Box::pin(async { Err(anyhow::anyhow!("unused provider factory")) })
@@ -4267,5 +4262,106 @@ print(\"hello, world\")
 
         assert!(unrelated.try_recv().is_none());
         assert_eq!(hub.subscriber_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_info_reports_each_sessions_active_run_from_the_shared_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let services = StateMachineServices::with_config(acp_services_config(
+            Arc::new(SessionManager::new(root.path().to_path_buf())),
+            root.path().to_path_buf(),
+            true,
+            GoosePlatform::GooseCli,
+        ));
+        let owner = connection_with_services(root.path(), services.clone()).await;
+        let observer = connection_with_services(root.path(), services.clone()).await;
+
+        let mut sessions = Vec::new();
+        for title in ["First run probe", "Second run probe"] {
+            sessions.push(
+                owner
+                    .services
+                    .session_manager
+                    .create_session(
+                        root.path().to_path_buf(),
+                        title.to_string(),
+                        SessionType::Acp,
+                        GooseMode::Auto,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let probe = |agent: Arc<AcpConnection>, session_id: String| async move {
+            let info = agent
+                .on_get_session_info(GetSessionInfoRequest { session_id })
+                .await
+                .unwrap();
+            let goose = info
+                .session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("goose"))
+                .cloned()
+                .expect("session info must carry the goose meta object");
+            goose.get("activeRunId").cloned().expect("activeRunId key")
+        };
+        let wait_for = |agent: Arc<AcpConnection>,
+                        session_id: String,
+                        expected: serde_json::Value| async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if probe(agent.clone(), session_id.clone()).await == expected {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "session {session_id} never reported {expected}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        assert!(probe(observer.clone(), sessions[0].id.clone())
+            .await
+            .is_null());
+        assert!(probe(observer.clone(), sessions[1].id.clone())
+            .await
+            .is_null());
+
+        let runs = &services.runtime.runs;
+        assert!(runs
+            .start_prompt_run(
+                &sessions[0].id,
+                "run-1".to_string(),
+                CancellationToken::new()
+            )
+            .is_ok());
+        assert!(runs
+            .start_prompt_run(
+                &sessions[1].id,
+                "run-2".to_string(),
+                CancellationToken::new()
+            )
+            .is_ok());
+
+        assert_eq!(
+            probe(observer.clone(), sessions[0].id.clone()).await,
+            serde_json::json!("run-1")
+        );
+        assert_eq!(
+            probe(observer.clone(), sessions[1].id.clone()).await,
+            serde_json::json!("run-2")
+        );
+
+        assert!(runs.remove_agent_run(&sessions[0].id, "run-1"));
+        assert!(runs.remove_agent_run(&sessions[1].id, "run-2"));
+        wait_for(
+            observer.clone(),
+            sessions[0].id.clone(),
+            serde_json::Value::Null,
+        )
+        .await;
+        wait_for(observer, sessions[1].id.clone(), serde_json::Value::Null).await;
     }
 }
