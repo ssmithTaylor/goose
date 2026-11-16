@@ -7,7 +7,7 @@ use goose_agent::tool_approval::{ApprovalDecision, ToolApproval};
 
 use crate::agents::state_machine::messages_since_kickoff;
 use crate::agents::state_machine::ops_toolcalling::{call_will_not_run, request_was_advertised};
-use crate::agents::subagent_coordination::held_tool_reason;
+use crate::agents::subagent_coordination::{held_tool_reason, SubagentParentTools};
 use crate::agents::subagent_events::SubagentEventHub;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
 use crate::config::permission::PermissionLevel;
@@ -22,16 +22,19 @@ use crate::tool_inspection::{
 pub struct GooseToolApproval<'a> {
     tool_inspection_manager: &'a ToolInspectionManager,
     subagent_events: Arc<SubagentEventHub>,
+    parent_tools: SubagentParentTools,
 }
 
 impl<'a> GooseToolApproval<'a> {
     pub(crate) fn new(
         tool_inspection_manager: &'a ToolInspectionManager,
         subagent_events: Arc<SubagentEventHub>,
+        parent_tools: SubagentParentTools,
     ) -> Self {
         Self {
             tool_inspection_manager,
             subagent_events,
+            parent_tools,
         }
     }
 
@@ -114,14 +117,17 @@ impl<'a> GooseToolApproval<'a> {
 
 #[async_trait]
 impl ToolApproval<Session> for GooseToolApproval<'_> {
-    /// While its subagents run the parent is offered fewer tools, and a call to any other is
-    /// refused before it is inspected.
+    /// With coordination tools only, a parent whose subagents run is offered fewer tools, and a
+    /// call to any other is refused before it is inspected.
     async fn check(
         &self,
         session: &Session,
         conversation: &Conversation,
         requests: &[&ToolRequest],
     ) -> Result<Vec<ApprovalDecision>> {
+        if self.parent_tools == SubagentParentTools::Full {
+            return self.inspect(session, conversation, requests).await;
+        }
         let running = self.subagent_events.running_subagents_of(&session.id);
         if running.is_empty() {
             return self.inspect(session, conversation, requests).await;

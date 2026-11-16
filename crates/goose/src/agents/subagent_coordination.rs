@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use rmcp::model::Tool;
+use serde::Deserialize;
 use tokio::sync::oneshot;
 
 use crate::agents::extension_manager::is_tool_owned_by_extension;
@@ -15,6 +16,34 @@ use crate::agents::platform_extensions::summon;
 pub(crate) const STEER_SUBAGENT_TOOL_NAME: &str = "steer_subagent";
 pub(crate) const ASK_PARENT_TOOL_NAME: &str = "ask_parent";
 const DELEGATE_TOOL_NAME: &str = "delegate";
+pub(crate) const PARENT_TOOLS_CONFIG_KEY: &str = "GOOSE_SUBAGENT_PARENT_TOOLS";
+
+/// What a parent may do while its subagents run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentParentTools {
+    /// Every tool; the parent keeps working and waits only once it ends its turn.
+    #[default]
+    Full,
+    /// Coordination, `delegate` and read-only tools, and only after a steer or a question
+    /// wakes the parent.
+    Coordination,
+}
+
+impl SubagentParentTools {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        config
+            .get_param::<Self>(PARENT_TOOLS_CONFIG_KEY)
+            .unwrap_or_default()
+    }
+}
+
+/// A running subagent as the parent's turn context describes it.
+pub(crate) struct RunningSubagent {
+    pub id: String,
+    pub task: Option<String>,
+    pub model: Option<String>,
+}
 
 struct Question {
     id: u64,
@@ -152,13 +181,51 @@ fn subagent_list(running: &[String]) -> String {
     running.join(", ")
 }
 
-pub(crate) fn waiting_note(running: &[String], questions: &[(String, String)]) -> String {
+fn running_lines(running: &[RunningSubagent]) -> String {
+    running
+        .iter()
+        .map(|subagent| {
+            let model = subagent
+                .model
+                .as_deref()
+                .map(|model| format!(" [{model}]"))
+                .unwrap_or_default();
+            let task = subagent
+                .task
+                .as_deref()
+                .map(|task| format!(": {task}"))
+                .unwrap_or_default();
+            format!("- {}{model}{task}", subagent.id)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn waiting_note(
+    mode: SubagentParentTools,
+    running: &[RunningSubagent],
+    questions: &[(String, String)],
+) -> String {
+    let ids: Vec<String> = running.iter().map(|subagent| subagent.id.clone()).collect();
+    let guidance = match mode {
+        SubagentParentTools::Full => {
+            "You can keep working with all your tools while they run. Avoid editing files or \
+             state a running subagent is working on. Each result arrives here on its own when \
+             that subagent finishes, so do not poll or wait for them; when your own work is done, \
+             finish your response and the remaining results will follow."
+                .to_string()
+        }
+        SubagentParentTools::Coordination => format!(
+            "Until they all report back you can only use {STEER_SUBAGENT_TOOL_NAME}, \
+             {DELEGATE_TOOL_NAME} and read-only tools; your other tools return once every \
+             subagent has finished. If the user asks for a change now, delegate it, steer a \
+             subagent, or say you will make it when the subagents are done."
+        ),
+    };
     let mut note = format!(
-        "Subagents still running: {}. Until they all report back you can only use \
-         {STEER_SUBAGENT_TOOL_NAME}, {DELEGATE_TOOL_NAME} and read-only tools; your other tools \
-         return once every subagent has finished. If the user asks for a change now, delegate \
-         it, steer a subagent, or say you will make it when the subagents are done.",
-        subagent_list(running)
+        "Subagents still running: {}.\n{}\n{guidance}",
+        subagent_list(&ids),
+        running_lines(running)
     );
     for (subagent, question) in questions {
         note.push_str(&format!(
@@ -210,6 +277,49 @@ mod tests {
         assert!(coordination.questions_for("parent").is_empty());
         assert!(!coordination.answer("alpha", "lib.rs".to_string()));
         Ok(())
+    }
+
+    #[test]
+    fn the_note_lists_each_running_subagent_and_what_the_parent_may_do() {
+        let running = [
+            RunningSubagent {
+                id: "alpha".to_string(),
+                task: Some("read the docs".to_string()),
+                model: Some("gpt-4o".to_string()),
+            },
+            RunningSubagent {
+                id: "beta".to_string(),
+                task: None,
+                model: None,
+            },
+        ];
+        let full = waiting_note(SubagentParentTools::Full, &running, &[]);
+        assert!(full.starts_with(
+            "Subagents still running: alpha, beta.\n- alpha [gpt-4o]: read the docs\n- beta\n"
+        ));
+        assert!(full.contains("keep working with all your tools"));
+        assert!(full.contains("do not poll"));
+
+        let coordination = waiting_note(
+            SubagentParentTools::Coordination,
+            &running,
+            &[("beta".to_string(), "which file?".to_string())],
+        );
+        assert!(coordination.contains("you can only use steer_subagent"));
+        assert!(coordination.ends_with(
+            "Subagent beta is waiting for your answer to: which file?\n\
+             Answer it with steer_subagent(session_id: \"beta\", message: ...)."
+        ));
+    }
+
+    #[test]
+    fn the_parent_keeps_every_tool_unless_configured_otherwise() {
+        assert_eq!(SubagentParentTools::default(), SubagentParentTools::Full);
+        assert_eq!(
+            serde_json::from_value::<SubagentParentTools>(serde_json::json!("coordination"))
+                .unwrap(),
+            SubagentParentTools::Coordination
+        );
     }
 
     #[test]

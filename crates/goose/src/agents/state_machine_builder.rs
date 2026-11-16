@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -17,14 +18,16 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
 use crate::agents::state_machine::UnavailableDecisions;
 use crate::agents::state_machine::{
-    CompactionOperation, ContextRelevanceOperation, DoctorOperation, EmptyResponseOperation,
-    FinalOutputOperation, GooseEffect, GooseInferenceProvider, GooseInferenceRequestPreparer,
-    GooseToolApproval, InferenceRunner, Operation, ProjectOperation, RecipeOperation,
-    RemainingToolCallsOperation, RetryOperation, SkillOperation, SlashCommandOperation,
-    StateMachine, StatusOperation, Step, StopHookOperation, SubagentCoordinationOperation,
-    SubagentModelSwitchOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
-    ToolPairCompactionOperation, UnhandledToolCallsOperation,
+    CompactionOperation, ContextRelevanceOperation, DoctorOperation, EffectHandler, Emitter,
+    EmptyResponseOperation, FinalOutputOperation, GooseEffect, GooseInferenceProvider,
+    GooseInferenceRequestPreparer, GooseToolApproval, InferenceRunner, Operation, ProjectOperation,
+    RecipeOperation, RemainingToolCallsOperation, RetryOperation, SessionLoader, SkillOperation,
+    SlashCommandOperation, StateMachine, StatusOperation, Step, StopHookOperation,
+    SubagentCoordinationOperation, SubagentModelSwitchOperation, SubagentOperation,
+    ToolApprovalOperation, ToolExecutionOperation, ToolPairCompactionOperation,
+    UnhandledToolCallsOperation,
 };
+use crate::agents::subagent_coordination::SubagentParentTools;
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
 use crate::config::Config;
@@ -57,6 +60,63 @@ pub(crate) struct StateMachineConfig<'a> {
     pub(crate) extra_operations: Vec<Arc<dyn Operation<Session, GooseEffect>>>,
     pub(crate) cancel: CancellationToken,
     pub(crate) context_relevance: Option<Arc<dyn DecisionProvider>>,
+    pub(crate) subagent_parent_tools: SubagentParentTools,
+}
+
+pub(crate) struct GooseStateMachine<'a> {
+    machine: StateMachine<'a, Session, GooseEffect>,
+    subagents: Option<Arc<SubagentOperation<Session>>>,
+}
+
+impl<'a> From<StateMachine<'a, Session, GooseEffect>> for GooseStateMachine<'a> {
+    fn from(machine: StateMachine<'a, Session, GooseEffect>) -> Self {
+        Self {
+            machine,
+            subagents: None,
+        }
+    }
+}
+
+impl<'a> Deref for GooseStateMachine<'a> {
+    type Target = StateMachine<'a, Session, GooseEffect>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.machine
+    }
+}
+
+impl GooseStateMachine<'_> {
+    /// A turn that ends while subagents still run, on an error or at its turn limit, stops
+    /// them and reports every delegation it has not reported yet.
+    pub(crate) async fn stop_subagents<R>(
+        &self,
+        runtime: &R,
+        session: Session,
+        emit: &Emitter,
+    ) -> anyhow::Result<Session>
+    where
+        R: SessionLoader<Session> + EffectHandler<Session, GooseEffect>,
+    {
+        let (Some(subagents), Some(conversation)) =
+            (&self.subagents, session.conversation.as_ref())
+        else {
+            return Ok(session);
+        };
+        let mut effects = Operation::<Session, GooseEffect>::finalize_cancellation(
+            subagents.as_ref(),
+            &session,
+            conversation,
+            emit,
+        )
+        .await;
+        if effects.is_empty() {
+            return Ok(session);
+        }
+        self.machine
+            .apply(runtime, &session, &mut effects, emit)
+            .await?;
+        runtime.load(&session.id).await
+    }
 }
 
 /// Providers that manage their own context never run the operation, so they
@@ -96,9 +156,7 @@ fn typesafe_provider(config: &Config) -> anyhow::Result<Arc<dyn DecisionProvider
     Ok(Arc::new(TypeSafeProvider::new(client)))
 }
 
-pub(crate) fn build_state_machine(
-    config: StateMachineConfig<'_>,
-) -> StateMachine<'_, Session, GooseEffect> {
+pub(crate) fn build_state_machine(config: StateMachineConfig<'_>) -> GooseStateMachine<'_> {
     let StateMachineConfig {
         provider,
         model_config,
@@ -123,9 +181,21 @@ pub(crate) fn build_state_machine(
         extra_operations,
         cancel,
         context_relevance,
+        subagent_parent_tools,
     } = config;
     let manages_own_context = provider.manages_own_context();
     let services = Arc::clone(subagent_runner.services());
+    let subagents = SubagentOperation::new(Arc::new(subagent_runner))
+        .with_max_concurrency(
+            Config::global()
+                .get_param::<NonZeroUsize>("GOOSE_MAX_CONCURRENT_SUBAGENTS")
+                .unwrap_or(NonZeroUsize::new(5).unwrap()),
+        )
+        .with_wake(wake, steer_queue.clone());
+    let subagents = Arc::new(match subagent_parent_tools {
+        SubagentParentTools::Full => subagents.with_parent_working(),
+        SubagentParentTools::Coordination => subagents,
+    });
 
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
         Arc::new(FinalOutputOperation::new(provider.clone())),
@@ -133,6 +203,7 @@ pub(crate) fn build_state_machine(
             ToolApprovalOperation::new(Arc::new(GooseToolApproval::new(
                 tool_inspection_manager,
                 Arc::clone(&services.subagent_events),
+                subagent_parent_tools,
             )))
             .with_declined_message(DECLINED_RESPONSE),
         ),
@@ -152,20 +223,16 @@ pub(crate) fn build_state_machine(
             hook_manager.clone(),
             Arc::clone(&extension_lease),
         )),
+        // Ahead of the yield for pending confirmations, so that a parent awaiting an approval
+        // keeps its running subagents instead of ending the run and dropping them.
+        subagents.clone(),
         Arc::new(UnhandledToolCallsOperation::new()),
-        Arc::new(
-            SubagentOperation::new(Arc::new(subagent_runner))
-                .with_max_concurrency(
-                    Config::global()
-                        .get_param::<NonZeroUsize>("GOOSE_MAX_CONCURRENT_SUBAGENTS")
-                        .unwrap_or(NonZeroUsize::new(5).unwrap()),
-                )
-                .with_wake(wake, steer_queue.clone()),
-        ),
         Arc::new(SteerOperation::new(steer_queue)),
         Arc::new(SubagentCoordinationOperation::new(
             Arc::clone(&services.subagent_events),
             Arc::clone(&services.subagent_coordination),
+            Arc::clone(&session_manager),
+            subagent_parent_tools,
         )),
         Arc::new(BangCommandOperation::new("shell", "command")),
     ];
@@ -209,6 +276,7 @@ pub(crate) fn build_state_machine(
         tool_inspection_manager,
         context_limit,
         subagent_events: Arc::clone(&services.subagent_events),
+        subagent_parent_tools,
     };
     let inference_provider = Arc::new(GooseInferenceProvider::new(provider));
     let inference = Arc::new(
@@ -224,5 +292,8 @@ pub(crate) fn build_state_machine(
     steps.extend(operations.into_iter().map(Step::Operation));
     steps.push(Step::Inference(inference));
 
-    StateMachine::new(steps, cancel)
+    GooseStateMachine {
+        machine: StateMachine::new(steps, cancel),
+        subagents: Some(subagents),
+    }
 }

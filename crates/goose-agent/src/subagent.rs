@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::operation::{
-    applied, ends_turn, messages_since_kickoff, not_applicable, Emitter, Operation,
+    applied, ends_turn, messages_since_kickoff, not_applicable, trailing_error, Emitter, Operation,
     OperationResult, OperationStream,
 };
 use crate::steer::SteerQueue;
@@ -164,6 +164,7 @@ pub struct SubagentOperation<S> {
     running: Mutex<Running>,
     max_concurrency: NonZeroUsize,
     wake: Option<Wake>,
+    parent_works: bool,
 }
 
 fn has_open_tool_calls(conversation: &Conversation) -> bool {
@@ -191,6 +192,7 @@ impl<S> SubagentOperation<S> {
             running: Mutex::default(),
             max_concurrency: NonZeroUsize::MAX,
             wake: None,
+            parent_works: false,
         }
     }
 
@@ -200,6 +202,15 @@ impl<S> SubagentOperation<S> {
     /// message is queued or one of the parent's pending tool calls is answered.
     pub fn with_wake(mut self, signal: Arc<Notify>, steers: SteerQueue) -> Self {
         self.wake = Some(Wake { signal, steers });
+        self
+    }
+
+    /// With `with_wake`, the parent goes on inferring and using its tools while its subagents
+    /// run instead of waiting for a steer, and waits only once it ends its turn. Finished
+    /// subagents are still delivered only between the parent's tool calls, and not after an
+    /// error, so that the operations that recover from it or end the turn see it last.
+    pub fn with_parent_working(mut self) -> Self {
+        self.parent_works = true;
         self
     }
 
@@ -343,6 +354,21 @@ where
     }
 }
 
+fn take_ready_updates(running: &mut Running, emit: &Emitter) {
+    while let Some(Some((subagent_session_id, update))) =
+        running.subagent_runs.next().now_or_never()
+    {
+        match update {
+            SubagentUpdate::ToParent(message) => {
+                emit.message(message);
+            }
+            SubagentUpdate::Finished(outcome) => {
+                running.finished.push_back((subagent_session_id, outcome));
+            }
+        }
+    }
+}
+
 impl<S> SubagentOperation<S> {
     /// Waits on the subagents, leaving this step to deliver a result, add queued messages, let
     /// the parent respond to them, and pick up answers to its own tool calls. Nothing goes
@@ -361,7 +387,12 @@ impl<S> SubagentOperation<S> {
         }
         let messages = conversation.messages();
         let tool_calls_open = has_open_tool_calls(conversation);
-        if ends_turn(messages) {
+        if self.parent_works {
+            take_ready_updates(running, emit);
+            if trailing_error(conversation).is_some() {
+                return not_applicable();
+            }
+        } else if ends_turn(messages) {
             running.woken = false;
         }
         loop {
@@ -390,7 +421,11 @@ impl<S> SubagentOperation<S> {
                             .map(|message| E::from(emit.message(message))),
                     );
                 }
-                if running.woken && parent_turn_pending(messages) {
+                if self.parent_works {
+                    if !ends_turn(messages) {
+                        return not_applicable();
+                    }
+                } else if running.woken && parent_turn_pending(messages) {
                     return not_applicable();
                 }
             }

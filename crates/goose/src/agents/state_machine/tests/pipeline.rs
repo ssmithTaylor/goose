@@ -13,7 +13,7 @@ use crate::agents::extension::ExtensionConfig;
 use crate::agents::extension_manager::ExtensionLease;
 use crate::agents::mcp_client::McpClientTrait;
 use crate::agents::state_machine::{
-    messages_since_kickoff, Emitter, GooseEffect, Operation, RunStatus, StateMachine,
+    messages_since_kickoff, Emitter, GooseEffect, Operation, RunStatus,
 };
 use crate::agents::{AgentEvent, StateMachineServices, StateMachineServicesConfig, TurnSettings};
 use crate::config::permission::{PermissionLevel, PermissionManager};
@@ -191,7 +191,7 @@ impl TestPipeline {
     pub(super) async fn machine(
         &self,
         cancel: CancellationToken,
-    ) -> StateMachine<'_, Session, GooseEffect> {
+    ) -> crate::agents::state_machine_builder::GooseStateMachine<'_> {
         let services = self.services().await;
         services
             .create_state_machine(
@@ -279,6 +279,15 @@ impl TestPipeline {
     pub(super) fn with_deferred_tools(mut self) -> Self {
         assert!(!self.services.initialized());
         self.turn_settings.defer_tools = true;
+        self
+    }
+
+    /// The parent waits on its subagents with coordination tools only, as it did before it
+    /// could keep working beside them.
+    pub(super) fn with_coordinating_parent(mut self) -> Self {
+        assert!(!self.services.initialized());
+        self.turn_settings.subagent_parent_tools =
+            crate::agents::subagent_coordination::SubagentParentTools::Coordination;
         self
     }
 
@@ -918,6 +927,7 @@ async fn build_test_pipeline(
             tool_call_cutoff: None,
             auto_effort: None,
             context_relevance: None,
+            subagent_parent_tools: Default::default(),
         },
         max_turns: MAX_TURNS,
         session_id: session.id.clone(),
