@@ -267,6 +267,55 @@ describe('subagent live updates', () => {
     expect(snapshot(SUBAGENT_ID)?.activeRunId).toBe(RUN_ID);
   });
 
+  it('tracks the routing choice per run and drops it when a later update omits it', async () => {
+    await handleAcpSessionNotification({
+      sessionId: SUBAGENT_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: goose({
+          activeRunId: RUN_ID,
+          provider: 'anthropic',
+          model: 'claude-sonnet',
+          routing: { capability: 'code', tier: 'balanced', reason: 'Known bug' },
+        }),
+      },
+    });
+    expect(snapshot(SUBAGENT_ID)?.routing).toEqual({
+      capability: 'code',
+      tier: 'balanced',
+      reason: 'Known bug',
+    });
+
+    await handleAcpSessionNotification({
+      sessionId: SUBAGENT_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: goose({ activeRunId: null, subagentOutcome: 'completed' }),
+      },
+    });
+    expect(snapshot(SUBAGENT_ID)?.routing?.capability).toBe('code');
+
+    await handleAcpSessionNotification({
+      sessionId: SUBAGENT_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: goose({ activeRunId: 'run-2', provider: 'openai', model: 'gpt-5' }),
+      },
+    });
+    expect(snapshot(SUBAGENT_ID)?.routing).toBeNull();
+  });
+
+  it('ignores a routing value without a capability and tier', async () => {
+    await handleAcpSessionNotification({
+      sessionId: SUBAGENT_ID,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: goose({ activeRunId: RUN_ID, routing: { capability: 'code', reason: 'x' } }),
+      },
+    });
+    expect(snapshot(SUBAGENT_ID)?.routing).toBeNull();
+  });
+
   it('keeps one running subagent when a model switch restarts it under a new run id', async () => {
     await handleAcpSessionNotification(runStarted());
     await handleAcpSessionNotification(messageChunk('Halfway there'));

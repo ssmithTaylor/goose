@@ -15,11 +15,18 @@ export type AcpChatStateChange =
       subagentOutcome?: SubagentOutcome;
       providerId?: string;
       modelId?: string;
+      routing?: SubagentRouting | null;
     }
   | { type: 'localSteerConfirmed'; messageId: string }
   | { type: 'notification'; notification: NotificationEvent };
 
 export type SubagentOutcome = 'completed' | 'failed' | 'cancelled';
+
+export interface SubagentRouting {
+  capability: string;
+  tier: string;
+  reason: string | null;
+}
 
 export interface AdapterState {
   messages: Message[];
@@ -158,6 +165,17 @@ export function getGooseSessionModel(update: { _meta?: unknown }): {
     ...(typeof goose.provider === 'string' && goose.provider ? { providerId: goose.provider } : {}),
     ...(typeof goose.model === 'string' && goose.model ? { modelId: goose.model } : {}),
   };
+}
+
+export function getGooseRouting(update: { _meta?: unknown }): SubagentRouting | undefined {
+  if (!isRecord(update._meta)) return undefined;
+  const goose = update._meta.goose;
+  if (!isRecord(goose) || !isRecord(goose.routing)) return undefined;
+  const { capability, tier, reason } = goose.routing;
+  if (typeof capability !== 'string' || !capability || typeof tier !== 'string' || !tier) {
+    return undefined;
+  }
+  return { capability, tier, reason: typeof reason === 'string' && reason ? reason : null };
 }
 
 export function getGooseSubagentSessionId(meta: unknown): string | undefined {

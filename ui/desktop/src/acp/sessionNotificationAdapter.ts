@@ -19,6 +19,7 @@ import {
   getGooseActiveRunId,
   getGooseParentSessionId,
   getGooseQueuedSteer,
+  getGooseRouting,
   getGooseSessionModel,
   getGooseSubagentOutcome,
 } from './adapter/shared';
@@ -112,6 +113,7 @@ function applyAcpSessionNotification(
           ...(parentSessionId ? { parentSessionId } : {}),
           ...(subagentOutcome ? { subagentOutcome } : {}),
           ...sessionModel,
+          ...(typeof activeRunId === 'string' ? { routing: getGooseRouting(update) ?? null } : {}),
         });
       }
 

@@ -138,6 +138,26 @@ describe('BaseChat showing a subagent session', () => {
     expect(screen.getByTestId('location')).toHaveTextContent(`/pair?resumeSessionId=${PARENT_ID}`);
   });
 
+  it('shows the routing choice and its reason in the full view', async () => {
+    await notify({
+      sessionUpdate: 'session_info_update',
+      _meta: {
+        goose: {
+          activeRunId: RUN_ID,
+          parentSessionId: PARENT_ID,
+          provider: 'anthropic',
+          model: 'claude-opus',
+          routing: { capability: 'code', tier: 'powerful', reason: 'Multi-file refactor' },
+        },
+      },
+    });
+    renderSubagentChat();
+
+    const badge = await screen.findByTestId('subagent-model');
+    expect(badge).toHaveTextContent(/^code · powerful · claude-opus$/);
+    expect(badge).toHaveAccessibleDescription('Why this model: Multi-file refactor');
+  });
+
   it('shows the subagent model and its pending approval in the full view', async () => {
     await notify({
       sessionUpdate: 'session_info_update',

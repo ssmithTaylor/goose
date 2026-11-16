@@ -95,6 +95,7 @@ function snapshotWithName(name: string): AcpChatSessionSnapshot {
     subagentOutcome: null,
     providerId: null,
     modelId: null,
+    routing: null,
     pendingSubagentInputs: [],
   };
 }
@@ -122,6 +123,7 @@ function snapshotWithoutSession(): AcpChatSessionSnapshot {
     subagentOutcome: null,
     providerId: null,
     modelId: null,
+    routing: null,
     pendingSubagentInputs: [],
   };
 }

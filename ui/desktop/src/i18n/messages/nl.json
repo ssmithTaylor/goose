@@ -4535,6 +4535,135 @@
   "subagentModelsSection.title": {
     "defaultMessage": "Subagent models"
   },
+  "subagentRouting.addCapability": {
+    "defaultMessage": "Add capability"
+  },
+  "subagentRouting.capabilityDescription": {
+    "defaultMessage": "Description"
+  },
+  "subagentRouting.capabilityName": {
+    "defaultMessage": "Capability name"
+  },
+  "subagentRouting.choose": {
+    "defaultMessage": "Choose"
+  },
+  "subagentRouting.chooseTierModel": {
+    "defaultMessage": "Choose the {tier} model for {capability}"
+  },
+  "subagentRouting.clearTierModel": {
+    "defaultMessage": "Clear the {tier} model for {capability}"
+  },
+  "subagentRouting.codeDescription": {
+    "defaultMessage": "Reading, changing and reviewing code"
+  },
+  "subagentRouting.defaultCapability": {
+    "defaultMessage": "Default capability"
+  },
+  "subagentRouting.description": {
+    "defaultMessage": "Maps the capability and tier the agent picks for a delegated task to a model. Order: a model named when delegating, recipe or custom agent settings, this table, the subagent default model, the main chat model."
+  },
+  "subagentRouting.discard": {
+    "defaultMessage": "Discard changes"
+  },
+  "subagentRouting.emptyState": {
+    "defaultMessage": "Not set up. Add capabilities such as general or code, and choose a fast, balanced and powerful model for each, so cheap jobs go to cheap models and hard ones to strong models."
+  },
+  "subagentRouting.extensions": {
+    "defaultMessage": "Extensions"
+  },
+  "subagentRouting.failsMinContext": {
+    "defaultMessage": "This model's context ({contextLimit} tokens) is below the minimum ({minContext})."
+  },
+  "subagentRouting.failsReasoning": {
+    "defaultMessage": "This model doesn't support reasoning."
+  },
+  "subagentRouting.generalDescription": {
+    "defaultMessage": "Everyday tasks, research, summaries, writing"
+  },
+  "subagentRouting.instructions": {
+    "defaultMessage": "Extra instructions"
+  },
+  "subagentRouting.minContext": {
+    "defaultMessage": "Minimum context (tokens)"
+  },
+  "subagentRouting.nameDuplicate": {
+    "defaultMessage": "Another capability has this name."
+  },
+  "subagentRouting.nameEmpty": {
+    "defaultMessage": "Give the capability a name."
+  },
+  "subagentRouting.noExtensions": {
+    "defaultMessage": "No extensions configured."
+  },
+  "subagentRouting.noPricing": {
+    "defaultMessage": "No pricing is known for {provider}'s models that meet the requirements, so tiers weren't suggested. Choose the models yourself."
+  },
+  "subagentRouting.notSet": {
+    "defaultMessage": "Not set"
+  },
+  "subagentRouting.pickerDescription": {
+    "defaultMessage": "Subagents routed to this capability and tier use this model."
+  },
+  "subagentRouting.removeCapability": {
+    "defaultMessage": "Remove capability {name}"
+  },
+  "subagentRouting.requireReasoning": {
+    "defaultMessage": "Reasoning"
+  },
+  "subagentRouting.requireVision": {
+    "defaultMessage": "Vision"
+  },
+  "subagentRouting.requirements": {
+    "defaultMessage": "Requirements"
+  },
+  "subagentRouting.save": {
+    "defaultMessage": "Save routing"
+  },
+  "subagentRouting.saveFailed": {
+    "defaultMessage": "Couldn't save subagent routing"
+  },
+  "subagentRouting.setUp": {
+    "defaultMessage": "Set up routing"
+  },
+  "subagentRouting.suggestFailed": {
+    "defaultMessage": "Couldn't load {provider}'s models: {error}"
+  },
+  "subagentRouting.suggestProvider": {
+    "defaultMessage": "Provider for suggested tiers"
+  },
+  "subagentRouting.suggestTiers": {
+    "defaultMessage": "Suggest tiers"
+  },
+  "subagentRouting.suggesting": {
+    "defaultMessage": "Suggesting…"
+  },
+  "subagentRouting.tierBalanced": {
+    "defaultMessage": "Balanced"
+  },
+  "subagentRouting.tierBalancedHint": {
+    "defaultMessage": "Single-file edits, known bugs"
+  },
+  "subagentRouting.tierFallback": {
+    "defaultMessage": "An empty tier uses the nearest chosen tier of the same capability, then the same tier of the default capability."
+  },
+  "subagentRouting.tierFast": {
+    "defaultMessage": "Fast"
+  },
+  "subagentRouting.tierFastHint": {
+    "defaultMessage": "Lookups, one-line fixes"
+  },
+  "subagentRouting.tierPowerful": {
+    "defaultMessage": "Powerful"
+  },
+  "subagentRouting.tierPowerfulHint": {
+    "defaultMessage": "Multi-file refactors, architecture, long reasoning"
+  },
+  "subagentRouting.title": {
+    "defaultMessage": "Subagent routing"
+  },
+  "subagentRouting.turnOff": {
+    "defaultMessage": "Turn off routing"
+  },
   "subagentRunControls.completed": {
     "defaultMessage": "Completed"
   },
@@ -4549,6 +4678,12 @@
   },
   "subagentRunControls.readOnly": {
     "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.routedModel": {
+    "defaultMessage": "{capability} · {tier} · {model}"
+  },
+  "subagentRunControls.routingReason": {
+    "defaultMessage": "Why this model: {reason}"
   },
   "subagentRunControls.running": {
     "defaultMessage": "Running"

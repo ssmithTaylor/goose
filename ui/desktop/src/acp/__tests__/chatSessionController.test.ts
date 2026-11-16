@@ -121,6 +121,7 @@ function snapshotWithActivePrompt(activePromptAttemptId: string | null): AcpChat
     subagentOutcome: null,
     providerId: null,
     modelId: null,
+    routing: null,
     pendingSubagentInputs: [],
   };
 }
