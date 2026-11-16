@@ -1,10 +1,14 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use goose_agent::tool_approval::{ApprovalDecision, ToolApproval};
 
-use crate::agents::state_machine::ops_toolcalling::call_will_not_run;
+use crate::agents::state_machine::messages_since_kickoff;
+use crate::agents::state_machine::ops_toolcalling::{call_will_not_run, request_was_advertised};
+use crate::agents::subagent_coordination::held_tool_reason;
+use crate::agents::subagent_events::SubagentEventHub;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
 use crate::config::permission::PermissionLevel;
 use crate::conversation::message::ToolRequest;
@@ -17,19 +21,21 @@ use crate::tool_inspection::{
 
 pub struct GooseToolApproval<'a> {
     tool_inspection_manager: &'a ToolInspectionManager,
+    subagent_events: Arc<SubagentEventHub>,
 }
 
 impl<'a> GooseToolApproval<'a> {
-    pub fn new(tool_inspection_manager: &'a ToolInspectionManager) -> Self {
+    pub(crate) fn new(
+        tool_inspection_manager: &'a ToolInspectionManager,
+        subagent_events: Arc<SubagentEventHub>,
+    ) -> Self {
         Self {
             tool_inspection_manager,
+            subagent_events,
         }
     }
-}
 
-#[async_trait]
-impl ToolApproval<Session> for GooseToolApproval<'_> {
-    async fn check(
+    async fn inspect(
         &self,
         session: &Session,
         conversation: &Conversation,
@@ -101,6 +107,49 @@ impl ToolApproval<Session> for GooseToolApproval<'_> {
                     );
                 }
                 ApprovalDecision::Ask { prompt }
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl ToolApproval<Session> for GooseToolApproval<'_> {
+    /// While its subagents run the parent is offered fewer tools, and a call to any other is
+    /// refused before it is inspected.
+    async fn check(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        requests: &[&ToolRequest],
+    ) -> Result<Vec<ApprovalDecision>> {
+        let running = self.subagent_events.running_subagents_of(&session.id);
+        if running.is_empty() {
+            return self.inspect(session, conversation, requests).await;
+        }
+        let messages = messages_since_kickoff(conversation)?;
+        let (offered, held): (Vec<&ToolRequest>, Vec<&ToolRequest>) = requests
+            .iter()
+            .copied()
+            .partition(|request| request_was_advertised(messages, request));
+        let held: HashSet<&str> = held.iter().map(|request| request.id.as_str()).collect();
+        let mut inspected = self
+            .inspect(session, conversation, &offered)
+            .await?
+            .into_iter();
+        Ok(requests
+            .iter()
+            .map(|request| {
+                if !held.contains(request.id.as_str()) {
+                    return inspected.next().unwrap_or(ApprovalDecision::Allow);
+                }
+                let tool_name = request
+                    .tool_call
+                    .as_ref()
+                    .map(|call| call.name.to_string())
+                    .unwrap_or_default();
+                ApprovalDecision::Deny {
+                    reason: held_tool_reason(&tool_name, &running),
+                }
             })
             .collect())
     }

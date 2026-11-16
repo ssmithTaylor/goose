@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -7,14 +7,17 @@ use async_trait::async_trait;
 use futures::stream::{self, SelectAll, StreamExt};
 use futures::FutureExt;
 use goose_provider_types::conversation::message::Message;
-use goose_provider_types::conversation::Conversation;
+use goose_provider_types::conversation::{effective_role, Conversation, EffectiveRole};
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::operation::{
-    applied, not_applicable, Emitter, Operation, OperationResult, OperationStream,
+    applied, ends_turn, messages_since_kickoff, not_applicable, Emitter, Operation,
+    OperationResult, OperationStream,
 };
+use crate::steer::SteerQueue;
+use crate::tool_call_state::tool_calls;
 
 const OPERATION_NAME: &str = "foreground_subagent";
 const DELIVERED: &str = "delivered";
@@ -147,12 +150,38 @@ fn tracked_updates(
 struct Running {
     subagent_session_ids: HashSet<String>,
     subagent_runs: SelectAll<OperationStream<'static, (String, SubagentUpdate)>>,
+    finished: VecDeque<(String, SubagentOutcome)>,
+    woken: bool,
+}
+
+struct Wake {
+    signal: Arc<Notify>,
+    steers: SteerQueue,
 }
 
 pub struct SubagentOperation<S> {
     runner: Arc<dyn SubagentRunner<S>>,
     running: Mutex<Running>,
     max_concurrency: NonZeroUsize,
+    wake: Option<Wake>,
+}
+
+fn has_open_tool_calls(conversation: &Conversation) -> bool {
+    messages_since_kickoff(conversation).is_ok_and(|messages| {
+        tool_calls(messages)
+            .iter()
+            .any(|(_, state)| state.is_open())
+    })
+}
+
+fn parent_turn_pending(messages: &[Message]) -> bool {
+    messages.last().is_some_and(|last| {
+        last.is_agent_visible()
+            && matches!(
+                effective_role(last),
+                EffectiveRole::User | EffectiveRole::Tool
+            )
+    })
 }
 
 impl<S> SubagentOperation<S> {
@@ -161,7 +190,17 @@ impl<S> SubagentOperation<S> {
             runner,
             running: Mutex::default(),
             max_concurrency: NonZeroUsize::MAX,
+            wake: None,
         }
+    }
+
+    /// Lets the parent act while its subagents run. A message queued on `steers` goes into the
+    /// conversation and the parent responds to it before it waits again; meanwhile finished
+    /// subagents are delivered only between the parent's tool calls. Notify `signal` whenever a
+    /// message is queued or one of the parent's pending tool calls is answered.
+    pub fn with_wake(mut self, signal: Arc<Notify>, steers: SteerQueue) -> Self {
+        self.wake = Some(Wake { signal, steers });
+        self
     }
 
     /// Limits how many subagents run at once; additional subagents remain pending.
@@ -217,18 +256,22 @@ where
         conversation: &Conversation,
         emit: &Emitter,
     ) -> Vec<E> {
-        let mut stopped = std::mem::take(&mut *self.running.lock().await);
+        let Running {
+            mut subagent_runs,
+            finished,
+            ..
+        } = std::mem::take(&mut *self.running.lock().await);
         let pending = self.pending_subagents(session, conversation);
         let mut effects = Vec::new();
         let mut delivered = HashSet::new();
-        let finished = std::iter::from_fn(|| loop {
-            match stopped.subagent_runs.next().now_or_never().flatten()? {
+        let finished = finished.into_iter().chain(std::iter::from_fn(|| loop {
+            match subagent_runs.next().now_or_never().flatten()? {
                 (subagent_session_id, SubagentUpdate::Finished(outcome)) => {
                     return Some((subagent_session_id, outcome))
                 }
                 (_, SubagentUpdate::ToParent(_)) => {}
             }
-        });
+        }));
         for (subagent_session_id, outcome) in finished {
             if outcome == SubagentOutcome::Cancelled {
                 continue;
@@ -239,7 +282,7 @@ where
                 effects.push(effect);
             }
         }
-        drop(stopped);
+        drop(subagent_runs);
 
         let cancelled: Vec<String> = pending
             .into_iter()
@@ -278,19 +321,97 @@ where
                 .push(tracked_updates(subagent_session_id.clone(), updates));
         }
 
-        while let Some((subagent_session_id, update)) = running.subagent_runs.next().await {
-            let outcome = match update {
-                SubagentUpdate::ToParent(message) => {
-                    emit.message(message);
+        let Some(wake) = &self.wake else {
+            while let Some((subagent_session_id, update)) = running.subagent_runs.next().await {
+                let outcome = match update {
+                    SubagentUpdate::ToParent(message) => {
+                        emit.message(message);
+                        continue;
+                    }
+                    SubagentUpdate::Finished(outcome) => outcome,
+                };
+                running.subagent_session_ids.remove(&subagent_session_id);
+                if let Some(effect) = self.deliver(&subagent_session_id, &outcome, remaining, emit)
+                {
+                    return applied([effect]);
+                }
+            }
+            return not_applicable();
+        };
+        self.run_with_wake(&mut running, wake, conversation, remaining, emit)
+            .await
+    }
+}
+
+impl<S> SubagentOperation<S> {
+    /// Waits on the subagents, leaving this step to deliver a result, add queued messages, let
+    /// the parent respond to them, and pick up answers to its own tool calls. Nothing goes
+    /// between a tool call and its response.
+    async fn run_with_wake<E: From<Message>>(
+        &self,
+        running: &mut Running,
+        wake: &Wake,
+        conversation: &Conversation,
+        remaining: usize,
+        emit: &Emitter,
+    ) -> Result<OperationResult<E>> {
+        if running.subagent_session_ids.is_empty() {
+            running.woken = false;
+            return not_applicable();
+        }
+        let messages = conversation.messages();
+        let tool_calls_open = has_open_tool_calls(conversation);
+        if ends_turn(messages) {
+            running.woken = false;
+        }
+        loop {
+            if !tool_calls_open {
+                if let Some((subagent_session_id, outcome)) = running.finished.pop_front() {
+                    running.subagent_session_ids.remove(&subagent_session_id);
+                    if let Some(effect) =
+                        self.deliver(&subagent_session_id, &outcome, remaining, emit)
+                    {
+                        return applied([effect]);
+                    }
                     continue;
                 }
-                SubagentUpdate::Finished(outcome) => outcome,
-            };
-            running.subagent_session_ids.remove(&subagent_session_id);
-            if let Some(effect) = self.deliver(&subagent_session_id, &outcome, remaining, emit) {
-                return applied([effect]);
+                let steers: Vec<Message> = wake
+                    .steers
+                    .lock()
+                    .await
+                    .drain(..)
+                    .map(Message::with_steer)
+                    .collect();
+                if !steers.is_empty() {
+                    running.woken = true;
+                    return applied(
+                        steers
+                            .into_iter()
+                            .map(|message| E::from(emit.message(message))),
+                    );
+                }
+                if running.woken && parent_turn_pending(messages) {
+                    return not_applicable();
+                }
+            }
+            tokio::select! {
+                update = running.subagent_runs.next(), if !running.subagent_runs.is_empty() => {
+                    match update {
+                        Some((_, SubagentUpdate::ToParent(message))) => {
+                            emit.message(message);
+                        }
+                        Some((subagent_session_id, SubagentUpdate::Finished(outcome))) => {
+                            running.finished.push_back((subagent_session_id, outcome));
+                        }
+                        None => {}
+                    }
+                }
+                _ = wake.signal.notified() => {
+                    if tool_calls_open {
+                        return applied(Vec::new());
+                    }
+                }
             }
         }
-        not_applicable()
     }
 }

@@ -26,6 +26,7 @@ pub struct SessionRuntime {
     /// Per session, in attach order; the last one is who the session currently talks to.
     attachments: Mutex<HashMap<String, IndexMap<u64, Attachment>>>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
+    wakes: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     lifetimes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(super) confirmations: ToolConfirmationCoordinator,
     pub runs: Arc<ActiveRunRegistry>,
@@ -38,6 +39,7 @@ impl SessionRuntime {
             resident: Mutex::new(lru::LruCache::unbounded()),
             attachments: Mutex::new(HashMap::new()),
             steer_queues: Mutex::new(HashMap::new()),
+            wakes: Mutex::new(HashMap::new()),
             lifetimes: Mutex::new(HashMap::new()),
             confirmations: ToolConfirmationCoordinator::new(),
             runs: Arc::new(ActiveRunRegistry::default()),
@@ -163,6 +165,21 @@ impl SessionRuntime {
 
     pub(super) async fn steer(&self, session_id: &str, message: Message) {
         self.steer_queue(session_id).lock().await.push_back(message);
+        self.wake(session_id);
+    }
+
+    /// Notified when a turn waiting on its subagents has something new to act on.
+    pub(super) fn wake_signal(&self, session_id: &str) -> Arc<tokio::sync::Notify> {
+        self.wakes
+            .lock()
+            .expect("session runtime poisoned")
+            .entry(session_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    pub(super) fn wake(&self, session_id: &str) {
+        self.wake_signal(session_id).notify_one();
     }
 
     pub(super) fn discard_pending_steers(&self, session_id: &str) {
@@ -204,6 +221,10 @@ impl SessionRuntime {
             .expect("session runtime poisoned")
             .remove(session_id);
         self.discard_pending_steers(session_id);
+        self.wakes
+            .lock()
+            .expect("session runtime poisoned")
+            .remove(session_id);
         self.confirmations.release(session_id);
         self.runs.cancel_agent_run(session_id);
     }

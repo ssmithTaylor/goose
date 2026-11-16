@@ -492,3 +492,75 @@ async fn concurrency_limit_queues_subagents_until_a_slot_is_available() {
     assert!(run_once(&operation, &messages).await.is_empty());
     assert_eq!(runner.started(), ["a", "b", "c"]);
 }
+
+fn woken_operation(
+    runner: &Arc<FakeRunner>,
+) -> (
+    SubagentOperation<Parent>,
+    Arc<tokio::sync::Notify>,
+    goose_agent::steer::SteerQueue,
+) {
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let steers = goose_agent::steer::SteerQueue::default();
+    let operation = operation(runner).with_wake(signal.clone(), steers.clone());
+    (operation, signal, steers)
+}
+
+#[tokio::test]
+async fn a_queued_steer_wakes_the_parent_while_its_subagent_runs() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let (operation, signal, steers) = woken_operation(&runner);
+    let mut messages = vec![start(&["a"])];
+
+    let (steered, ()) = tokio::join!(run_once(&operation, &messages), async {
+        steers
+            .lock()
+            .await
+            .push_back(Message::user().with_text("how is it going?"));
+        signal.notify_one();
+    });
+    assert_eq!(texts(&steered), ["how is it going?"]);
+    assert!(steered[0].metadata.steer);
+    messages.extend(steered);
+
+    assert!(run_once(&operation, &messages).await.is_empty());
+    messages.push(Message::assistant().with_text("still working"));
+    interrupt(&operation, &messages);
+
+    a.finish(SubagentOutcome::Completed("done".into()));
+    assert_eq!(
+        texts(&run_once(&operation, &messages).await),
+        ["Subagent a completed: done"]
+    );
+    assert_eq!(runner.started(), ["a"]);
+}
+
+#[tokio::test]
+async fn results_wait_for_the_parents_open_tool_calls() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    let (operation, signal, _steers) = woken_operation(&runner);
+    let mut messages = vec![
+        start(&["a"]),
+        Message::assistant().with_tool_request(
+            "call-1",
+            Ok(rmcp::model::CallToolRequestParams::new("shell")),
+        ),
+    ];
+
+    a.finish(SubagentOutcome::Completed("done".into()));
+    let (picked_up, ()) = tokio::join!(run_once(&operation, &messages), async {
+        signal.notify_one();
+    });
+    assert!(picked_up.is_empty());
+
+    messages.push(Message::user().with_tool_response(
+        "call-1",
+        Ok(rmcp::model::CallToolResult::success(Vec::new())),
+    ));
+    assert_eq!(
+        texts(&run_once(&operation, &messages).await),
+        ["Subagent a completed: done"]
+    );
+}
