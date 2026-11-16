@@ -4502,9 +4502,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Stel een subrecept in dat tijdens het uitvoeren van een recept als tool kan worden aangeroepen"
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },

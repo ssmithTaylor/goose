@@ -4307,9 +4307,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Configure uma subrreceita que pode ser invocada como ferramenta durante a execução da receita"
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },

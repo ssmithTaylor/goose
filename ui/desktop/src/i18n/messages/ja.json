@@ -4307,9 +4307,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "レシピ実行中にツールとして呼び出せるサブレシピを設定します"
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },

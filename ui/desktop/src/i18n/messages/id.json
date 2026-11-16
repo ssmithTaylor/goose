@@ -4307,9 +4307,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Konfigurasikan subresep yang dapat dipanggil sebagai alat selama eksekusi resep"
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },

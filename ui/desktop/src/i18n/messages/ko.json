@@ -4307,9 +4307,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "레시피 실행 시 도구로 호출할 수 있는 서브레시피를 구성합니다."
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },

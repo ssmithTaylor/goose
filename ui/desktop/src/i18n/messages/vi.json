@@ -4307,9 +4307,6 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Định cấu hình một công thức con có thể được gọi như công cụ trong quá trình thực thi công thức"
   },
-  "subagentCoordination.answeredSubagent": {
-    "defaultMessage": "Answered subagent {subagent}: {message}"
-  },
   "subagentCoordination.askedParent": {
     "defaultMessage": "Asked the parent: {question}"
   },
