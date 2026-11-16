@@ -23,7 +23,6 @@ import {
   acpChatSessionStore,
   useAcpChatSessionSnapshot,
 } from '../acp/chatSessionStore';
-import { acpSteerSession } from '../acp/prompt';
 import { isAcpRecovering } from '../acp/acpConnection';
 
 const initialTokenState: TokenState = {
@@ -39,10 +38,6 @@ function isClearCommand(message: string): boolean {
   return message.trim() === '/clear';
 }
 
-function isSlashCommand(message: string): boolean {
-  return message.trim().startsWith('/');
-}
-
 const i18n = defineMessages({
   notificationTitle: {
     id: 'chat.notification.taskComplete.title',
@@ -53,6 +48,19 @@ const i18n = defineMessages({
     defaultMessage: 'Click here to bring Goose back into focus.',
   },
 });
+
+export function groupNotificationsByRequestId(
+  notifications: NotificationEvent[]
+): Map<string, NotificationEvent[]> {
+  return notifications.reduce((map, notification) => {
+    const key = notification.request_id;
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key)!.push(notification);
+    return map;
+  }, new Map<string, NotificationEvent[]>());
+}
 
 export function useChatSession({
   sessionId,
@@ -69,6 +77,8 @@ export function useChatSession({
   const tokenState = acpSnapshot?.tokenState ?? initialTokenState;
   const queueProcessingBlocked = acpSnapshot?.pendingCancelPromptAttemptId != null;
   const hasActiveRun = acpSnapshot?.activeRunId != null;
+  const parentSessionId = acpSnapshot?.parentSessionId ?? null;
+  const subagentOutcome = acpSnapshot?.subagentOutcome ?? null;
 
   const snapshotRef = useRef(acpSnapshot);
   snapshotRef.current = acpSnapshot;
@@ -175,6 +185,8 @@ export function useChatSession({
 
       if (
         !currentSnapshot?.session ||
+        currentSnapshot.session.session_type === 'sub_agent' ||
+        currentSnapshot.parentSessionId !== null ||
         currentSnapshot.chatState === ChatState.LoadingConversation ||
         currentSnapshot.chatState === ChatState.Streaming ||
         currentSnapshot.chatState === ChatState.Thinking ||
@@ -222,56 +234,8 @@ export function useChatSession({
   );
 
   const onSteerQueuedMessage = useCallback(
-    async (input: UserInput): Promise<boolean> => {
-      const { msg: userMessage, images } = input;
-      const hasTextContent = userMessage.trim().length > 0;
-      const hasNewMessage = hasTextContent || images.length > 0;
-      if (!hasNewMessage) {
-        return false;
-      }
-
-      // ACP confirms picked-up steers with user text chunks; image-only steers cannot confirm pickup.
-      if (!hasTextContent) {
-        return false;
-      }
-
-      if (isSlashCommand(userMessage)) {
-        return false;
-      }
-
-      const activeRunId =
-        acpChatSessionStore.getSnapshot(sessionId)?.activeRunId ??
-        getCurrentSnapshot()?.activeRunId;
-      if (!activeRunId) {
-        return false;
-      }
-
-      try {
-        const steeredMessage = createUserMessage(userMessage, images);
-        const response = await acpSteerSession(sessionId, steeredMessage, activeRunId);
-        const localSteerMessage: Message = {
-          ...steeredMessage,
-          id: response.messageId,
-          metadata: { ...steeredMessage.metadata, steer: true },
-        };
-        const latestSnapshot = acpChatSessionStore.getSnapshot(sessionId) ?? getCurrentSnapshot();
-        if (latestSnapshot?.activeRunId !== activeRunId) {
-          return false;
-        }
-
-        const currentMessages = latestSnapshot.messages;
-
-        if (!currentMessages.some((message) => message.id === response.messageId)) {
-          acpChatSessionActions.addPendingLocalSteerMessage(sessionId, localSteerMessage);
-        }
-
-        return true;
-      } catch (error) {
-        console.warn('Failed to steer ACP session:', error);
-        return false;
-      }
-    },
-    [getCurrentSnapshot, sessionId]
+    (input: UserInput): Promise<boolean> => acpChatSessionController.steer(sessionId, input),
+    [sessionId]
   );
 
   const submitElicitationResponse = useCallback(
@@ -340,16 +304,10 @@ export function useChatSession({
     },
     [getCurrentSnapshot, sessionId]
   );
-  const notificationsMap = useMemo(() => {
-    return (acpSnapshot?.notifications ?? []).reduce((map, notification) => {
-      const key = notification.request_id;
-      if (!map.has(key)) {
-        map.set(key, []);
-      }
-      map.get(key)!.push(notification);
-      return map;
-    }, new Map<string, NotificationEvent[]>());
-  }, [acpSnapshot?.notifications]);
+  const notificationsMap = useMemo(
+    () => groupNotificationsByRequestId(acpSnapshot?.notifications ?? []),
+    [acpSnapshot?.notifications]
+  );
 
   return {
     sessionLoadError,
@@ -369,6 +327,8 @@ export function useChatSession({
     pauseQueueOnStop: false,
     queueProcessingBlocked,
     hasActiveRun,
+    parentSessionId,
+    subagentOutcome,
     onMessageUpdate,
   };
 }

@@ -137,6 +137,9 @@
   "backButton.back": {
     "defaultMessage": "Back"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "Failed to Load Session"
   },
@@ -4499,11 +4502,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Configure a subrecipe that can be called as a tool during recipe execution"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "Load latest progress"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "Subagent progress isn't shown live here."
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "Back to model list"
@@ -4712,9 +4763,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "Tool status: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "Activity ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "Code"
   },
@@ -4732,9 +4780,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "Tool result"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "View subagent session"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "Allow {toolName}?"

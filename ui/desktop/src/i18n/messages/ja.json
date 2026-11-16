@@ -116,6 +116,9 @@
   "backButton.back": {
     "defaultMessage": "戻る"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "セッションの読み込みに失敗しました"
   },
@@ -4304,11 +4307,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "レシピ実行中にツールとして呼び出せるサブレシピを設定します"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "最新の進捗を読み込む"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "サブエージェントの進捗はここではリアルタイムに表示されません。"
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "モデル一覧に戻る"
@@ -4517,9 +4568,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "ツールのステータス: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "アクティビティ ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "コード"
   },
@@ -4537,9 +4585,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "ツールの結果"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "サブエージェントのセッションを表示"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "{toolName}の実行を許可しますか？"

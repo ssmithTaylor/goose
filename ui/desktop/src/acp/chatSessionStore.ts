@@ -11,7 +11,7 @@ import {
   type AcpSessionNotificationAdapter,
 } from './sessionNotificationAdapter';
 import type { ElicitationStatus } from './adapter/elicitations';
-import { cloneMessage } from './adapter/shared';
+import { cloneMessage, getGooseParentSessionId, type SubagentOutcome } from './adapter/shared';
 import type { AcpElicitationRequest } from './elicitationRequests';
 import type { AcpPermissionRequest } from './permissionRequestTypes';
 
@@ -26,6 +26,8 @@ export interface AcpChatSessionSnapshot {
   activePromptAttemptId: string | null;
   activeRunId: string | null;
   pendingCancelPromptAttemptId: string | null;
+  parentSessionId: string | null;
+  subagentOutcome: SubagentOutcome | null;
 }
 
 type SnapshotListener = (snapshot: AcpChatSessionSnapshot) => void;
@@ -61,6 +63,7 @@ export interface AcpChatSessionStore {
 
 export interface AcpChatSessionActions {
   deleteSnapshot(sessionId: string): void;
+  linkSubagentSession(subagentSessionId: string, parentSessionId: string): void;
 
   applyAcpSessionNotification(notification: SessionNotification): AcpChatSessionSnapshot;
   applyAcpGooseSessionNotification(
@@ -182,6 +185,8 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
       activePromptAttemptId: null,
       activeRunId: null,
       pendingCancelPromptAttemptId: null,
+      parentSessionId: null,
+      subagentOutcome: null,
       promptCancellationRestoreState: null,
       pendingUserInputRequestIds: new Set(),
       pendingLocalSteerMessageIds: new Set(),
@@ -202,6 +207,18 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
       }
     }
     return snapshot;
+  };
+
+  const linkSubagentSession: AcpChatSessionActions['linkSubagentSession'] = (
+    subagentSessionId,
+    parentSessionId
+  ) => {
+    const entry = getOrCreateEntry(subagentSessionId);
+    if (entry.parentSessionId === parentSessionId) {
+      return;
+    }
+    entry.parentSessionId = parentSessionId;
+    notify(subagentSessionId, entry);
   };
 
   const setSessionMetadata: AcpChatSessionActions['setSessionMetadata'] = (sessionId, session) => {
@@ -228,7 +245,10 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     // fast path above skips message copies while loading).
     entry.messages = entry.adapter.getMessages();
     retainPendingLocalSteerMessageIds(entry);
-    entry.chatState = entry.activePromptAttemptId ? ChatState.Streaming : ChatState.Idle;
+    entry.chatState =
+      entry.activePromptAttemptId || isRunningSubagent(entry)
+        ? ChatState.Streaming
+        : ChatState.Idle;
     return notify(sessionId, entry);
   };
 
@@ -454,6 +474,10 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     notification
   ) => {
     const entry = getOrCreateEntry(notification.sessionId);
+    const parentSessionId = getGooseParentSessionId(notification.update);
+    if (parentSessionId) {
+      entry.parentSessionId = parentSessionId;
+    }
     if (shouldClearProgressMessage(notification)) {
       entry.progressMessage = undefined;
     }
@@ -548,6 +572,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     getSnapshot,
     subscribe,
     deleteSnapshot,
+    linkSubagentSession,
     setSessionMetadata,
     startSessionLoad,
     finishSessionLoad,
@@ -622,6 +647,7 @@ function storeFromInternal(store: AcpChatSessionStoreInternal): AcpChatSessionSt
 function actionsFromStore(store: AcpChatSessionStoreInternal): AcpChatSessionActions {
   return {
     deleteSnapshot: store.deleteSnapshot,
+    linkSubagentSession: store.linkSubagentSession,
     applyAcpSessionNotification: store.applyAcpSessionNotification,
     applyAcpGooseSessionNotification: store.applyAcpGooseSessionNotification,
     applyPermissionRequest: store.applyPermissionRequest,
@@ -665,8 +691,12 @@ function applyChatStateChanges(entry: StoreEntry, changes: AcpChatStateChange[])
         if (change.name && entry.session) {
           entry.session = { ...entry.session, name: change.name };
         }
+        if (change.parentSessionId) {
+          entry.parentSessionId = change.parentSessionId;
+        }
         if (change.activeRunId !== undefined) {
           entry.activeRunId = change.activeRunId;
+          applySubagentRunChange(entry, change.subagentOutcome);
         }
         break;
       case 'localSteerConfirmed':
@@ -679,6 +709,37 @@ function applyChatStateChanges(entry: StoreEntry, changes: AcpChatStateChange[])
         break;
     }
   }
+}
+
+// Subagent runs are driven by the parent's prompt, so their run-started and
+// run-finished updates are the only signal of whether the subagent is working.
+function applySubagentRunChange(entry: StoreEntry, outcome: SubagentOutcome | undefined): void {
+  if (!entry.parentSessionId || entry.activePromptAttemptId !== null) {
+    return;
+  }
+
+  if (entry.activeRunId) {
+    entry.subagentOutcome = null;
+  } else {
+    entry.subagentOutcome = outcome ?? entry.subagentOutcome;
+  }
+
+  if (entry.chatState === ChatState.LoadingConversation) {
+    return;
+  }
+
+  if (entry.activeRunId) {
+    entry.chatState = ChatState.Streaming;
+    return;
+  }
+
+  discardPendingLocalSteerMessages(entry);
+  entry.progressMessage = undefined;
+  entry.chatState = ChatState.Idle;
+}
+
+function isRunningSubagent(entry: StoreEntry): boolean {
+  return entry.parentSessionId !== null && entry.activeRunId !== null;
 }
 
 function shouldClearProgressMessage(notification: SessionNotification): boolean {
@@ -777,6 +838,8 @@ function snapshotFromEntry(entry: StoreEntry): AcpChatSessionSnapshot {
     activePromptAttemptId: entry.activePromptAttemptId,
     activeRunId: entry.activeRunId,
     pendingCancelPromptAttemptId: entry.pendingCancelPromptAttemptId,
+    parentSessionId: entry.parentSessionId,
+    subagentOutcome: entry.subagentOutcome,
   };
 }
 

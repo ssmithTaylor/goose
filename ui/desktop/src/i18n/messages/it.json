@@ -116,6 +116,9 @@
   "backButton.back": {
     "defaultMessage": "Indietro"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "Impossibile caricare la sessione"
   },
@@ -4304,11 +4307,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Configura una sottoricetta che può essere richiamata come strumento durante l'esecuzione della ricetta"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "Carica gli ultimi progressi"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "I progressi del subagente non vengono mostrati in tempo reale qui."
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "Torna all'elenco dei modelli"
@@ -4517,9 +4568,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "Stato dello strumento: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "Attività ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "Codice"
   },
@@ -4537,9 +4585,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "Risultato dello strumento"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "Visualizza la sessione del subagent"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "Consentire {toolName}?"

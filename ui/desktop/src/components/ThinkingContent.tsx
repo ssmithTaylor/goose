@@ -4,12 +4,14 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collap
 import Expand from './ui/Expand';
 import { AppEvents } from '../constants/events';
 import type { ShowThinking } from '../utils/settings';
+import { cn } from '../utils';
 
 interface ThinkingContentProps {
   content: string;
+  isActive?: boolean;
 }
 
-export default function ThinkingContent({ content }: ThinkingContentProps) {
+export default function ThinkingContent({ content, isActive = false }: ThinkingContentProps) {
   const [showThinking, setShowThinking] = useState<ShowThinking | null>(null);
   const [manualToggle, setManualToggle] = useState<boolean | null>(null);
 
@@ -37,7 +39,7 @@ export default function ThinkingContent({ content }: ThinkingContentProps) {
     <Collapsible open={expanded} onOpenChange={(open) => setManualToggle(open)} className="mb-2">
       <CollapsibleTrigger className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors cursor-pointer">
         <Expand size={3} isExpanded={expanded} />
-        <span className="italic">Thinking</span>
+        <span className={cn('italic', isActive && 'animate-pulse')}>Thinking</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-1 ml-[18px] text-xs text-text-secondary italic">

@@ -1,5 +1,6 @@
 import { AppEvents } from '../constants/events';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft } from 'lucide-react';
 import { defineMessages, useIntl } from '../i18n';
 import { useLocation, useNavigate } from 'react-router';
 import { SearchView } from './conversation/SearchView';
@@ -9,6 +10,7 @@ import { MainPanelLayout } from './Layout/MainPanelLayout';
 import ChatInput from './ChatInput';
 import { ChatInputCard } from './ChatInputCard';
 import { SubagentSessionNotice } from './SubagentSessionNotice';
+import { SubagentRunControls } from './SubagentRunControls';
 import { Button } from './ui/button';
 import { ScrollArea, ScrollAreaHandle } from './ui/scroll-area';
 import { useFileDrop } from '../hooks/useFileDrop';
@@ -56,6 +58,10 @@ const i18n = defineMessages({
   reconnecting: {
     id: 'baseChat.reconnecting',
     defaultMessage: 'Connection lost. Reconnecting…',
+  },
+  backToParentSession: {
+    id: 'baseChat.backToParentSession',
+    defaultMessage: 'Back to parent chat',
   },
 });
 
@@ -160,6 +166,8 @@ export default function BaseChat({
     pauseQueueOnStop,
     queueProcessingBlocked,
     hasActiveRun,
+    parentSessionId,
+    subagentOutcome,
     onMessageUpdate,
   } = useChatSession({
     sessionId,
@@ -171,7 +179,9 @@ export default function BaseChat({
   );
 
   const sessionLoaded = session !== undefined;
-  const isSubagentSession = session?.session_type === 'sub_agent';
+  const isSubagentSession = session?.session_type === 'sub_agent' || parentSessionId !== null;
+  const hasLiveSubagentUpdates =
+    parentSessionId !== null && (hasActiveRun || subagentOutcome !== null);
   const liveVoiceChatBusy = chatState !== ChatState.Idle;
 
   useEffect(() => {
@@ -489,6 +499,19 @@ export default function BaseChat({
             paddingX={6}
             paddingY={0}
           >
+            {isSubagentSession && parentSessionId && (
+              <div className="sticky top-0 z-10 bg-background-primary -mx-6 px-4 pb-2 pt-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setView('pair', { resumeSessionId: parentSessionId })}
+                >
+                  <ArrowLeft />
+                  {intl.formatMessage(i18n.backToParentSession)}
+                </Button>
+              </div>
+            )}
+
             {recipe?.title && (
               <div className="sticky top-0 z-10 bg-background-primary px-0 -mx-6 mb-6 pt-6">
                 <RecipeHeader title={recipe.title} />
@@ -559,7 +582,11 @@ export default function BaseChat({
           </button>
         )}
 
-        {isSubagentSession ? (
+        {isSubagentSession && hasLiveSubagentUpdates ? (
+          <ChatInputCard className="relative z-30 mx-4 mb-4 px-4 py-3">
+            <SubagentRunControls subagentSessionId={sessionId} />
+          </ChatInputCard>
+        ) : isSubagentSession ? (
           <SubagentSessionNotice
             refreshing={chatState === ChatState.LoadingConversation}
             onRefresh={() => void refreshSession()}

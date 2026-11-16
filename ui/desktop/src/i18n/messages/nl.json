@@ -137,6 +137,9 @@
   "backButton.back": {
     "defaultMessage": "Terug"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "Sessie laden mislukt"
   },
@@ -4499,11 +4502,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Stel een subrecept in dat tijdens het uitvoeren van een recept als tool kan worden aangeroepen"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "Laatste stand laden"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "Je ziet hier niet live wat de subagent doet."
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "Terug naar de lijst met modellen"
@@ -4712,9 +4763,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "Status van de tool: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "Activiteit ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "Code"
   },
@@ -4732,9 +4780,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "Resultaat van de tool"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "Sessie van de subagent bekijken"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "{toolName} toestaan?"

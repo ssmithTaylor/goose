@@ -65,6 +65,8 @@ function GooseMessage({
   const displayText = isOutputTokenLimitFallback ? '' : textContent;
   const imagePaths = isOutputTokenLimitFallback ? [] : allImagePaths;
   const thinkingContent = isOutputTokenLimitFallback ? null : getThinkingContent(message);
+  const isThinkingActive =
+    isStreaming && message.content[message.content.length - 1]?.type === 'thinking';
 
   const timestamp = useMemo(() => formatMessageTimestamp(message.created), [message.created]);
   const toolRequests = getToolRequests(message);
@@ -102,7 +104,7 @@ function GooseMessage({
       <div className="flex flex-col w-full min-w-0">
         {thinkingContent && (
           <div className="group">
-            <ThinkingContent content={thinkingContent} />
+            <ThinkingContent content={thinkingContent} isActive={isThinkingActive} />
             {!displayText.trim() && imagePaths.length === 0 && toolRequests.length === 0 && (
               <div className="relative flex items-center justify-between">
                 <div

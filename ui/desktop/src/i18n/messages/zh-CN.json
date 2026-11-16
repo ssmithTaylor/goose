@@ -116,6 +116,9 @@
   "backButton.back": {
     "defaultMessage": "返回"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "加载会话失败"
   },
@@ -4304,11 +4307,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "配置一个可在配方执行过程中作为工具调用的子配方"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "加载最新进度"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "子代理的进度不会在此实时显示。"
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "返回模型列表"
@@ -4517,9 +4568,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "工具状态：{status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "活动（{count}）"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "代码"
   },
@@ -4537,9 +4585,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "工具结果"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "查看子 agent 会话"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "允许 {toolName} 吗？"

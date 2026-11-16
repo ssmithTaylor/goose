@@ -11,9 +11,13 @@ export type AcpChatStateChange =
       name?: string;
       activeRunId?: string | null;
       gooseMode?: string;
+      parentSessionId?: string;
+      subagentOutcome?: SubagentOutcome;
     }
   | { type: 'localSteerConfirmed'; messageId: string }
   | { type: 'notification'; notification: NotificationEvent };
+
+export type SubagentOutcome = 'completed' | 'failed' | 'cancelled';
 
 export interface AdapterState {
   messages: Message[];
@@ -121,6 +125,23 @@ export function getGooseActiveRunId(update: { _meta?: unknown }): string | null 
 
   return typeof goose.activeRunId === 'string' || goose.activeRunId === null
     ? goose.activeRunId
+    : undefined;
+}
+
+export function getGooseParentSessionId(update: { _meta?: unknown }): string | undefined {
+  if (!isRecord(update._meta)) return undefined;
+  const goose = update._meta.goose;
+  if (!isRecord(goose)) return undefined;
+  return typeof goose.parentSessionId === 'string' ? goose.parentSessionId : undefined;
+}
+
+export function getGooseSubagentOutcome(update: { _meta?: unknown }): SubagentOutcome | undefined {
+  if (!isRecord(update._meta)) return undefined;
+  const goose = update._meta.goose;
+  if (!isRecord(goose)) return undefined;
+  const outcome = goose.subagentOutcome;
+  return outcome === 'completed' || outcome === 'failed' || outcome === 'cancelled'
+    ? outcome
     : undefined;
 }
 

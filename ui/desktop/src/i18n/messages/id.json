@@ -116,6 +116,9 @@
   "backButton.back": {
     "defaultMessage": "Kembali"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "Gagal Memuat Sesi"
   },
@@ -4304,11 +4307,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Konfigurasikan subresep yang dapat dipanggil sebagai alat selama eksekusi resep"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "Muat progres terbaru"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "Progres subagen tidak ditampilkan secara langsung di sini."
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "Kembali ke daftar model"
@@ -4517,9 +4568,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "Status alat: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "Aktivitas ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "Kode"
   },
@@ -4537,9 +4585,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "Hasil alat"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "Lihat sesi subagen"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "Izinkan {toolName}?"

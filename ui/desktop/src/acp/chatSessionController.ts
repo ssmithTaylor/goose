@@ -9,6 +9,7 @@ import {
   getPendingToolConfirmationIds,
   type ImageData,
   type Message,
+  type UserInput,
 } from '../types/message';
 import {
   acpChatSessionActions,
@@ -23,9 +24,10 @@ import {
   type AcpCreditsExhaustedError,
 } from './errors';
 import { cancelAcpPermissionRequestsForSession } from './permissionRequests';
-import { acpCancelPrompt, acpPromptSession } from './prompt';
+import { acpCancelPrompt, acpPromptSession, acpSteerSession } from './prompt';
 import {
   acpForkSession,
+  acpGetSession,
   acpLoadSession,
   acpNewSession,
   acpTruncateSessionConversation,
@@ -62,6 +64,8 @@ export interface AcpChatSessionController {
     options: AcpSubmitMessageOptions
   ): Promise<void>;
   stop(sessionId: string): void;
+  stopSubagent(sessionId: string): Promise<void>;
+  steer(sessionId: string, input: UserInput): Promise<boolean>;
   updateMessage(
     sessionId: string,
     messageId: string,
@@ -142,7 +146,36 @@ async function loadSession(sessionId: string, options: AcpLoadSessionOptions = {
     return;
   }
 
+  if (cached && hasLiveSubagentState(cached)) {
+    await attachLiveSubagentSession(sessionId, options);
+    return;
+  }
+
   await loadSessionFromServer(sessionId, options);
+}
+
+// A subagent the client is already receiving live updates for only needs its
+// metadata; replaying it with session/load would reset the streamed transcript.
+function hasLiveSubagentState(snapshot: AcpChatSessionSnapshot): boolean {
+  return (
+    snapshot.parentSessionId !== null &&
+    (snapshot.activeRunId !== null ||
+      snapshot.subagentOutcome !== null ||
+      snapshot.messages.length > 0)
+  );
+}
+
+async function attachLiveSubagentSession(
+  sessionId: string,
+  options: AcpLoadSessionOptions
+): Promise<void> {
+  try {
+    acpChatSessionActions.setSessionMetadata(sessionId, await acpGetSession(sessionId));
+    options.onSessionLoaded?.();
+  } catch (error) {
+    console.error('Failed to load ACP subagent session info:', error);
+    acpChatSessionActions.setSessionLoadError(sessionId, formatAcpError(error));
+  }
 }
 
 async function restoreSession(sessionId: string): Promise<void> {
@@ -247,6 +280,48 @@ function stop(sessionId: string): void {
   acpChatSessionActions.setChatState(sessionId, ChatState.Idle);
 }
 
+async function stopSubagent(sessionId: string): Promise<void> {
+  await acpCancelPrompt(sessionId);
+}
+
+function isSlashCommand(message: string): boolean {
+  return message.trim().startsWith('/');
+}
+
+async function steer(sessionId: string, { msg, images }: UserInput): Promise<boolean> {
+  // ACP confirms picked-up steers with user text chunks; image-only steers cannot confirm pickup.
+  if (!msg.trim() || isSlashCommand(msg)) {
+    return false;
+  }
+
+  const activeRunId = acpChatSessionStore.getSnapshot(sessionId)?.activeRunId;
+  if (!activeRunId) {
+    return false;
+  }
+
+  try {
+    const steeredMessage = createUserMessage(msg, images);
+    const response = await acpSteerSession(sessionId, steeredMessage, activeRunId);
+    const latestSnapshot = acpChatSessionStore.getSnapshot(sessionId);
+    if (latestSnapshot?.activeRunId !== activeRunId) {
+      return false;
+    }
+
+    if (!latestSnapshot.messages.some((message) => message.id === response.messageId)) {
+      acpChatSessionActions.addPendingLocalSteerMessage(sessionId, {
+        ...steeredMessage,
+        id: response.messageId,
+        metadata: { ...steeredMessage.metadata, steer: true },
+      });
+    }
+
+    return true;
+  } catch (error) {
+    console.warn('Failed to steer ACP session:', error);
+    return false;
+  }
+}
+
 async function updateMessage(
   sessionId: string,
   messageId: string,
@@ -339,5 +414,7 @@ export const acpChatSessionController: AcpChatSessionController = {
   restoreSession,
   submitMessage,
   stop,
+  stopSubagent,
+  steer,
   updateMessage,
 };

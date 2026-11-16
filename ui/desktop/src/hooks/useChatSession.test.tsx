@@ -39,13 +39,15 @@ function assistantMessage(text: string): Message {
   };
 }
 
-function renderChatSession(messages: Message[]) {
+function renderChatSession(messages: Message[], parentSessionId: string | null = null) {
   mocks.snapshot = {
     session: { id: 'sess-1' },
     messages,
     chatState: ChatState.Idle,
     pendingCancelPromptAttemptId: null,
     activeRunId: null,
+    parentSessionId,
+    subagentOutcome: null,
   };
   return renderHook(() => useChatSession({ sessionId: 'sess-1', onStreamFinish: vi.fn() }), {
     wrapper: IntlTestWrapper,
@@ -76,5 +78,13 @@ describe('useChatSession handleSubmit', () => {
 
     expect(mocks.submitMessage).toHaveBeenCalledTimes(1);
     expect(mocks.submitMessage).toHaveBeenCalledWith('sess-1', question, expect.anything());
+  });
+
+  it('never prompts a subagent session', async () => {
+    const { result } = renderChatSession([], 'parent-1');
+
+    await act(() => result.current.handleSubmit({ msg: 'Do something else', images: [] }));
+
+    expect(mocks.submitMessage).not.toHaveBeenCalled();
   });
 });

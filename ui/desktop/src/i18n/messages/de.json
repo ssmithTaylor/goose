@@ -116,6 +116,9 @@
   "backButton.back": {
     "defaultMessage": "Zurück"
   },
+  "baseChat.backToParentSession": {
+    "defaultMessage": "Back to parent chat"
+  },
   "baseChat.failedToLoadSession": {
     "defaultMessage": "Sitzung konnte nicht geladen werden"
   },
@@ -4304,11 +4307,59 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Konfigurieren Sie ein Subrezept, das während der Rezeptausführung als Tool aufgerufen werden kann"
   },
+  "subagentRunControls.completed": {
+    "defaultMessage": "Completed"
+  },
+  "subagentRunControls.failed": {
+    "defaultMessage": "Failed"
+  },
+  "subagentRunControls.readOnly": {
+    "defaultMessage": "This subagent has finished. Its transcript is read-only."
+  },
+  "subagentRunControls.running": {
+    "defaultMessage": "Running"
+  },
+  "subagentRunControls.steer": {
+    "defaultMessage": "Steer"
+  },
+  "subagentRunControls.steerFailed": {
+    "defaultMessage": "Couldn't steer the subagent. It may have just finished."
+  },
+  "subagentRunControls.steerPlaceholder": {
+    "defaultMessage": "Steer this subagent…"
+  },
+  "subagentRunControls.stop": {
+    "defaultMessage": "Stop"
+  },
+  "subagentRunControls.stopped": {
+    "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.thinking": {
+    "defaultMessage": "Thinking"
+  },
+  "subagentRunControls.waitingForApproval": {
+    "defaultMessage": "Waiting on approval"
+  },
   "subagentSessionNotice.loadLatestProgress": {
     "defaultMessage": "Neuesten Fortschritt laden"
   },
   "subagentSessionNotice.notice": {
     "defaultMessage": "Der Fortschritt des Subagenten wird hier nicht live angezeigt."
+  },
+  "subagentTranscript.empty": {
+    "defaultMessage": "No subagent activity yet."
+  },
+  "subagentTranscript.loading": {
+    "defaultMessage": "Loading subagent transcript…"
+  },
+  "subagentTranscript.openSubagent": {
+    "defaultMessage": "Open"
+  },
+  "subagentTranscript.openSubagentLabel": {
+    "defaultMessage": "Open subagent session"
+  },
+  "subagentTranscript.subagent": {
+    "defaultMessage": "Subagent"
   },
   "switchModelModal.backToModelList": {
     "defaultMessage": "Zurück zur Modellliste"
@@ -4517,9 +4568,6 @@
   "toolCallStatusIndicator.toolStatus": {
     "defaultMessage": "Tool-Status: {status}"
   },
-  "toolCallWithResponse.activityCount": {
-    "defaultMessage": "Aktivität ({count})"
-  },
   "toolCallWithResponse.code": {
     "defaultMessage": "Code"
   },
@@ -4537,9 +4585,6 @@
   },
   "toolCallWithResponse.toolResultAlt": {
     "defaultMessage": "Tool-Ergebnis"
-  },
-  "toolCallWithResponse.viewSubagentSession": {
-    "defaultMessage": "Subagent-Sitzung anzeigen"
   },
   "toolConfirmation.allowToolCallWithName": {
     "defaultMessage": "{toolName} erlauben?"
