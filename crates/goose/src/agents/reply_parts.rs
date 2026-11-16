@@ -168,6 +168,33 @@ fn message_has_timing_content(message: &Message) -> bool {
         .any(|content| !matches!(content, MessageContent::SystemNotification(_)))
 }
 
+/// Folds one streamed chunk into the message accumulated so far, with the same
+/// coalescing rules as `Conversation::push`: a provider streams each thinking
+/// block as unsigned deltas closed by its signature, and that must stay one block.
+pub(super) fn append_streamed_chunk(accumulated: &mut Message, chunk: Message) {
+    let is_single_block_delta = chunk.content.len() == 1;
+    for new_content in chunk.content {
+        match (accumulated.content.last_mut(), &new_content) {
+            (Some(MessageContent::Text(last)), MessageContent::Text(new))
+                if last.annotations.as_ref().and_then(|a| a.audience.as_ref())
+                    == new.annotations.as_ref().and_then(|a| a.audience.as_ref()) =>
+            {
+                last.text.push_str(&new.text);
+            }
+            (Some(MessageContent::Thinking(last)), MessageContent::Thinking(new))
+                if is_single_block_delta
+                    && (last.signature.is_empty() || new.signature == last.signature) =>
+            {
+                last.thinking.push_str(&new.thinking);
+                if !new.signature.is_empty() {
+                    last.signature = new.signature.clone();
+                }
+            }
+            _ => accumulated.content.push(new_content),
+        }
+    }
+}
+
 fn is_mergeable_assistant_chunk(message: &Message) -> bool {
     message.role == rmcp::model::Role::Assistant
         && !message.content.is_empty()
@@ -396,20 +423,7 @@ pub(crate) async fn stream_response_from_provider(
                     }
                     accumulated_message = Some(match accumulated_message {
                         Some(mut prev) => {
-                            for new_content in msg.content {
-                                match (&mut prev.content.last_mut(), &new_content) {
-                                    (
-                                        Some(MessageContent::Text(last_text)),
-                                        MessageContent::Text(new_text),
-                                    ) if last_text.annotations.as_ref().and_then(|a| a.audience.as_ref())
-                                        == new_text.annotations.as_ref().and_then(|a| a.audience.as_ref()) => {
-                                        last_text.text.push_str(&new_text.text);
-                                    }
-                                    _ => {
-                                        prev.content.push(new_content);
-                                    }
-                                }
-                            }
+                            append_streamed_chunk(&mut prev, msg);
                             prev
                         }
                         None => msg,
@@ -556,6 +570,28 @@ mod tests {
             let usage = ProviderUsage::new("capturing".to_string(), Usage::default());
             Ok(stream_from_single_message(message, usage))
         }
+    }
+
+    #[test]
+    fn appended_thinking_deltas_close_into_one_signed_block() {
+        let mut accumulated = Message::assistant().with_thinking("first ", "");
+        for chunk in [
+            Message::assistant().with_thinking("block.", ""),
+            Message::assistant().with_thinking("", "sig_1"),
+            Message::assistant().with_thinking("", "sig_2"),
+            Message::assistant().with_text("answer"),
+        ] {
+            append_streamed_chunk(&mut accumulated, chunk);
+        }
+
+        let thinking: Vec<(&str, &str)> = accumulated
+            .content
+            .iter()
+            .filter_map(MessageContent::as_thinking)
+            .map(|t| (t.thinking.as_str(), t.signature.as_str()))
+            .collect();
+        assert_eq!(thinking, vec![("first block.", "sig_1"), ("", "sig_2")]);
+        assert_eq!(accumulated.as_concat_text(), "answer");
     }
 
     #[tokio::test]
