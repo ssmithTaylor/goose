@@ -13,22 +13,21 @@ import {
   ToolConfirmationData,
 } from '../types/message';
 import { cn, snakeToTitleCase } from '../utils';
-import { ChevronRight, ExternalLink } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import { TooltipWrapper } from './settings/providers/subcomponents/buttons/TooltipWrapper';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ContentBlock } from '../types/message';
 
 import McpAppRenderer from './McpApps/McpAppRenderer';
 import ToolApprovalButtons from './ToolApprovalButtons';
+import { SubagentTranscript } from './SubagentTranscript';
+import { useAcpChatSessionSnapshot } from '../acp/chatSessionStore';
+import { isSubagentRunning } from '../acp/subagentStatus';
 import { defineMessages, useIntl } from '../i18n';
 
 type LoadingStatus = 'loading' | 'success' | 'error';
 
 const i18n = defineMessages({
-  viewSubagentSession: {
-    id: 'toolCallWithResponse.viewSubagentSession',
-    defaultMessage: 'View subagent session',
-  },
   toolDetails: {
     id: 'toolCallWithResponse.toolDetails',
     defaultMessage: 'Tool Details',
@@ -44,10 +43,6 @@ const i18n = defineMessages({
   toolResultAlt: {
     id: 'toolCallWithResponse.toolResultAlt',
     defaultMessage: 'Tool result',
-  },
-  activityCount: {
-    id: 'toolCallWithResponse.activityCount',
-    defaultMessage: 'Activity ({count})',
   },
   logs: {
     id: 'toolCallWithResponse.logs',
@@ -113,31 +108,11 @@ interface ToolCallWithResponseProps {
   isApprovalClicked?: boolean;
 }
 
-function getSubagentSessionId(
-  toolResponse?: ToolResponseMessageContent,
-  notifications?: NotificationEvent[]
-): string | null {
+function getSubagentSessionId(toolResponse?: ToolResponseMessageContent): string | null {
   const result = toolResponse?.toolResult as ToolResultWithMeta | undefined;
   const sessionId =
     result?.status === 'success' ? result?.value?._meta?.subagent_session_id : undefined;
-  if (typeof sessionId === 'string') return sessionId;
-
-  // Fallback: extract from subagent notifications (e.g. when delegate was cancelled mid-stream)
-  if (notifications) {
-    for (const n of notifications) {
-      const message = n.message as { method?: string; params?: Record<string, unknown> };
-      if (message.method !== 'notifications/message') continue;
-      const data = message.params?.data;
-      if (data && typeof data === 'object' && 'type' in data && 'subagent_id' in data) {
-        const record = data as Record<string, unknown>;
-        if (record.type === 'subagent_tool_request' && typeof record.subagent_id === 'string') {
-          return record.subagent_id;
-        }
-      }
-    }
-  }
-
-  return null;
+  return typeof sessionId === 'string' ? sessionId : null;
 }
 
 function getToolResultContent(toolResult: Record<string, unknown>): ContentBlock[] {
@@ -269,6 +244,7 @@ export default function ToolCallWithResponse({
       >
         <ToolCallView
           {...{
+            sessionId,
             isCancelledMessage,
             toolCall,
             toolResponse,
@@ -354,6 +330,7 @@ function ToolCallExpandable({
 }
 
 interface ToolCallViewProps {
+  sessionId?: string;
   isCancelledMessage: boolean;
   toolCall: {
     name: string;
@@ -371,82 +348,9 @@ interface Progress {
   message?: string;
 }
 
-interface SubagentToolRequestData {
-  type: 'subagent_tool_request';
-  subagent_id: string;
-  tool_call: {
-    name: string;
-    arguments?: { tool_graph?: ToolGraphNode[] };
-  };
-}
-
-const isSubagentToolRequestData = (data: unknown): data is SubagentToolRequestData => {
-  if (!data || typeof data !== 'object') {
-    return false;
-  }
-  const record = data as Record<string, unknown>;
-  if (record.type !== 'subagent_tool_request') {
-    return false;
-  }
-  if (typeof record.subagent_id !== 'string') {
-    return false;
-  }
-  if (!record.tool_call || typeof record.tool_call !== 'object') {
-    return false;
-  }
-  const toolCall = record.tool_call as Record<string, unknown>;
-  return typeof toolCall.name === 'string';
-};
-
-const formatSubagentToolCall = (data: SubagentToolRequestData): string => {
-  const subagentId = data.subagent_id;
-  const toolCall = data.tool_call;
-  const toolCallName = toolCall.name;
-
-  const shortId = subagentId?.split('_').pop() || subagentId;
-
-  const parts = toolCallName.split('__').reverse();
-  const toolName = parts[0] || 'unknown';
-  const extensionName = parts.slice(1).reverse().join('__') || '';
-  const toolGraph = toolCall.arguments?.tool_graph;
-
-  if (
-    ['execute_javascript', 'execute_typescript'].includes(toolName) &&
-    toolGraph &&
-    toolGraph.length > 0
-  ) {
-    const plural = toolGraph.length === 1 ? '' : 's';
-    const header = `[subagent:${shortId}] ${toolGraph.length} tool call${plural} | ${toolName}`;
-    const lines = toolGraph.map((node, idx) => {
-      const deps =
-        node.depends_on && node.depends_on.length > 0
-          ? ` (uses ${node.depends_on.map((d) => d + 1).join(', ')})`
-          : '';
-      return `  ${idx + 1}. ${node.tool}: ${node.description}${deps}`;
-    });
-    return [header, ...lines].join('\n');
-  }
-
-  return extensionName
-    ? `[subagent:${shortId}] ${toolName} | ${extensionName}`
-    : `[subagent:${shortId}] ${toolName}`;
-};
-
 const logToString = (logMessage: NotificationEvent) => {
   const message = logMessage.message as { method: string; params: unknown };
   const params = message.params as Record<string, unknown>;
-
-  if (
-    params &&
-    params.data &&
-    typeof params.data === 'object' &&
-    'type' in params.data &&
-    params.data.type === 'subagent_tool_request'
-  ) {
-    if (isSubagentToolRequestData(params.data)) {
-      return formatSubagentToolCall(params.data);
-    }
-  }
 
   // Special case for the developer system shell logs
   if (
@@ -501,13 +405,13 @@ const getExtensionTooltip = (toolCallName: string): string | null => {
 };
 
 function ToolCallView({
+  sessionId,
   isCancelledMessage,
   toolCall,
   toolResponse,
   notifications,
   isStreamingMessage = false,
 }: ToolCallViewProps) {
-  const intl = useIntl();
   const [responseStyle, setResponseStyle] = useState<string>('concise');
 
   useEffect(() => {
@@ -595,6 +499,11 @@ function ToolCallView({
     loadingStatus === 'loading' &&
     (progressEntries.length > 0 || (logs || []).length > 0 || liveOutput.length > 0);
 
+  const subagentSessionId = loadingStatus === 'loading' ? null : getSubagentSessionId(toolResponse);
+  const isSubagentActive = isSubagentRunning(useAcpChatSessionSnapshot(subagentSessionId ?? ''));
+  const subagentWasActiveRef = useRef(false);
+  subagentWasActiveRef.current ||= isSubagentActive;
+
   // Get extension tooltip for the current tool
   const extensionTooltip = getExtensionTooltip(toolCall.name);
 
@@ -644,7 +553,7 @@ function ToolCallView({
   );
   return (
     <ToolCallExpandable
-      isStartExpanded={isRenderingActivity || isExpandToolDetails}
+      isStartExpanded={isRenderingActivity || subagentWasActiveRef.current || isExpandToolDetails}
       isForceExpand={false}
       label={
         extensionTooltip ? (
@@ -728,27 +637,9 @@ function ToolCallView({
         </>
       )}
 
-      {(() => {
-        if (loadingStatus === 'loading') return null;
-        const subagentSessionId = getSubagentSessionId(toolResponse, notifications);
-        if (!subagentSessionId) return null;
-        return (
-          <div className="border-t border-border-primary">
-            <button
-              onClick={() => {
-                window.electron.createChatWindow({
-                  resumeSessionId: subagentSessionId,
-                  viewType: 'pair',
-                });
-              }}
-              className="w-full flex items-center gap-2 px-4 py-2 text-xs text-text-secondary hover:text-text-primary hover:bg-background-secondary transition-colors cursor-pointer"
-            >
-              <ExternalLink className="w-3 h-3 flex-shrink-0" />
-              <span>{intl.formatMessage(i18n.viewSubagentSession)}</span>
-            </button>
-          </div>
-        );
-      })()}
+      {subagentSessionId && (
+        <SubagentTranscript parentSessionId={sessionId} subagentSessionId={subagentSessionId} />
+      )}
     </ToolCallExpandable>
   );
 }
@@ -898,34 +789,6 @@ function ToolResultView({ result, isStartExpanded }: ToolResultViewProps) {
   );
 }
 
-function SubagentLogEntry({ log }: { log: string }) {
-  const subagentMatch = log.match(/^\[subagent:(\w+)\]\s*([\s\S]*)/);
-  if (!subagentMatch) {
-    return <span className="font-sans text-sm text-textSubtle">{log}</span>;
-  }
-
-  const [, , rest] = subagentMatch;
-  const [firstLine, ...detailLines] = rest.split('\n');
-  const parts = firstLine.split(' | ');
-  const toolName = parts[0]?.trim() || firstLine;
-  const extensionName = parts[1]?.trim();
-
-  return (
-    <div className="font-sans text-sm text-textSubtle">
-      <span className="flex items-center gap-1.5">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
-        <span className="font-medium text-text-secondary">{toolName}</span>
-        {extensionName && <span className="text-textSubtle opacity-60">· {extensionName}</span>}
-      </span>
-      {detailLines.length > 0 && (
-        <pre className="ml-3 mt-0.5 text-xs text-textSubtle whitespace-pre-wrap">
-          {detailLines.join('\n')}
-        </pre>
-      )}
-    </div>
-  );
-}
-
 function ToolLogsView({
   logs,
   working,
@@ -951,11 +814,7 @@ function ToolLogsView({
   // in this case, this is array of strings which once added do not change so this cuts
   // down on the possibility of unwanted runs
 
-  const subagentLogCount = logs.filter((l) => l.startsWith('[subagent:')).length;
-  const labelText =
-    subagentLogCount > 0
-      ? intl.formatMessage(i18n.activityCount, { count: subagentLogCount })
-      : intl.formatMessage(i18n.logs);
+  const labelText = intl.formatMessage(i18n.logs);
 
   return (
     <ToolCallExpandable
@@ -981,7 +840,9 @@ function ToolLogsView({
         className={`flex flex-col items-start space-y-2 overflow-y-auto p-4 ${working ? 'max-h-[4rem]' : 'max-h-[20rem]'}`}
       >
         {logs.map((log, i) => (
-          <SubagentLogEntry key={i} log={log} />
+          <span key={i} className="font-sans text-sm text-textSubtle">
+            {log}
+          </span>
         ))}
       </div>
     </ToolCallExpandable>
