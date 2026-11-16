@@ -2,7 +2,7 @@ use crate::agents::{ExtensionLoadResult, StateMachineServices};
 use crate::config::{Config, GooseMode};
 use crate::providers::inventory::{ProviderInventoryEntry, ProviderInventoryService};
 use crate::session::session_manager::SessionUsageTotals;
-use crate::session::Session;
+use crate::session::{Session, SessionType};
 use crate::slash_commands::types::{SlashCommandEntry, SlashCommandSource};
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, SessionConfigOption,
@@ -69,9 +69,31 @@ impl<'a> From<&'a Session> for SessionMeta<'a> {
 }
 
 pub(super) fn session_meta(session: &Session) -> serde_json::Map<String, serde_json::Value> {
-    match serde_json::to_value(SessionMeta::from(session)) {
+    let mut meta = match serde_json::to_value(SessionMeta::from(session)) {
         Ok(serde_json::Value::Object(meta)) => meta,
         _ => serde_json::Map::new(),
+    };
+    insert_parent_session(&mut meta, session);
+    meta
+}
+
+/// A subagent's `_meta.goose.parentSessionId`, so a client can return to its parent after a reload.
+fn insert_parent_session(meta: &mut serde_json::Map<String, serde_json::Value>, session: &Session) {
+    let Some(parent_session_id) = session
+        .parent_session_id
+        .as_ref()
+        .filter(|_| session.session_type == SessionType::SubAgent)
+    else {
+        return;
+    };
+    let goose = meta
+        .entry("goose".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(goose) = goose {
+        goose.insert(
+            "parentSessionId".to_string(),
+            serde_json::Value::String(parent_session_id.clone()),
+        );
     }
 }
 
@@ -97,6 +119,7 @@ pub(super) fn session_response_meta(
         "workingDir".to_string(),
         serde_json::Value::String(session.working_dir.to_string_lossy().to_string()),
     );
+    insert_parent_session(&mut meta, session);
     meta
 }
 
@@ -968,5 +991,29 @@ mod tests {
 
         assert_eq!(current, "off");
         assert_eq!(values, vec![SessionConfigSelectOption::new("off", "off")]);
+    }
+
+    #[tokio::test]
+    async fn only_a_subagents_meta_names_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf());
+        let mut session = manager
+            .create_session(
+                dir.path().to_path_buf(),
+                "child".to_string(),
+                SessionType::User,
+                GooseMode::Auto,
+            )
+            .await
+            .unwrap();
+        session.parent_session_id = Some("parent".to_string());
+        assert!(!session_meta(&session).contains_key("goose"));
+
+        session.session_type = SessionType::SubAgent;
+        assert_eq!(session_meta(&session)["goose"]["parentSessionId"], "parent");
+        assert_eq!(
+            session_response_meta(&session, &[])["goose"]["parentSessionId"],
+            "parent"
+        );
     }
 }

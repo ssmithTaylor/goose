@@ -14,6 +14,7 @@ use crate::agents::mcp_client::GooseMcpHostInfo;
 use crate::agents::state_machine::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
 };
+use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate};
 use crate::agents::{
     Attachment, ExtensionConfig, ExtensionLoadResult, GoosePlatform, SessionConfig,
     StateMachineServices, StateMachineServicesConfig,
@@ -66,6 +67,7 @@ use anyhow::Result;
 use fs_err as fs;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, StreamExt};
+use goose_agent::subagent::SubagentOutcome;
 use goose_providers::errors::ProviderError;
 use rmcp::model::{
     Annotations as RmcpAnnotations, ImageContent as RmcpImageContent, Role,
@@ -223,6 +225,13 @@ const PROVIDER_CONFIG_STATUS_CHECK_CONCURRENCY: usize = 16;
 struct AgentStreamOutcome {
     was_cancelled: bool,
     output_token_limit_reached: bool,
+}
+
+#[derive(Default)]
+struct SubagentStream {
+    parent_session_id: String,
+    tool_requests: HashMap<String, ToolRequest>,
+    context_limit: Option<usize>,
 }
 
 /// Releases a registry entry if the task consuming an agent stream is dropped
@@ -770,6 +779,7 @@ fn prompt_stop_reason(was_cancelled: bool, output_token_limit_reached: bool) -> 
 struct SessionTarget {
     session_id: String,
     cancel_token: Option<CancellationToken>,
+    parent_session_id: Option<String>,
 }
 
 struct PendingToolPermission {
@@ -1330,6 +1340,8 @@ impl AcpConnection {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), agent_client_protocol::Error> {
         let role = &message.role;
+        let notifier = ToolCallNotifier::new(cx, session_id)
+            .for_subagent_of(target.parent_session_id.as_deref());
 
         match content_item {
             MessageContent::Text(text) => {
@@ -1341,29 +1353,25 @@ impl AcpConnection {
                     Role::User => SessionUpdate::UserMessageChunk(chunk),
                     Role::Assistant => SessionUpdate::AgentMessageChunk(chunk),
                 };
-                cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
+                notifier.send(update)?;
             }
             MessageContent::ToolRequest(tool_request) => {
-                self.handle_tool_request(tool_request, message, session_id, cx)
+                self.handle_tool_request(tool_request, message, session_id, notifier)
                     .await?;
             }
             MessageContent::ToolResponse(tool_response) => {
                 self.handle_tool_response(
                     tool_response,
                     tool_requests.get(&tool_response.id),
-                    session_id,
-                    cx,
+                    &notifier,
                 )
                 .await?;
             }
             MessageContent::Thinking(thinking) => {
-                cx.send_notification(SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(content_chunk_for_message(
-                        message,
-                        ContentBlock::Text(TextContent::new(thinking.thinking.clone())),
-                    )),
-                ))?;
+                notifier.send(SessionUpdate::AgentThoughtChunk(content_chunk_for_message(
+                    message,
+                    ContentBlock::Text(TextContent::new(thinking.thinking.clone())),
+                )))?;
             }
             MessageContent::ActionRequired(action_required) => match &action_required.data {
                 ActionRequiredData::ToolConfirmation {
@@ -1389,13 +1397,18 @@ impl AcpConnection {
                     message: elicitation_message,
                     requested_schema,
                 } => {
+                    let meta = self.mark_forwarding_subagent(
+                        message_meta_without_steer(message),
+                        session_id,
+                        id,
+                    );
                     self.handle_form_elicitation(
                         cx,
                         session_id,
                         id,
                         elicitation_message,
                         requested_schema,
-                        message_meta_without_steer(message),
+                        meta,
                     )
                     .await?;
                 }
@@ -1426,7 +1439,7 @@ impl AcpConnection {
                     Role::User => SessionUpdate::UserMessageChunk(chunk),
                     Role::Assistant => SessionUpdate::AgentMessageChunk(chunk),
                 };
-                cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
+                notifier.send(update)?;
             }
             MessageContent::SystemNotification(notification) => {
                 send_status_message_update(
@@ -1441,10 +1454,7 @@ impl AcpConnection {
                     message,
                     ContentBlock::Text(TextContent::new(error.message.clone())),
                 );
-                cx.send_notification(SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
-                ))?;
+                notifier.send(SessionUpdate::AgentMessageChunk(chunk))?;
             }
             _ => {}
         }
@@ -1476,7 +1486,7 @@ impl AcpConnection {
         tool_request: &ToolRequest,
         message: &Message,
         session_id: &SessionId,
-        cx: &ConnectionTo<Client>,
+        tool_call_notifier: ToolCallNotifier,
     ) -> Result<(), agent_client_protocol::Error> {
         let client_requests_label_enrichment = self.requests_tool_call_label_enrichment();
         let initial_tool_call = build_initial_tool_call_with_message_meta(
@@ -1484,7 +1494,6 @@ impl AcpConnection {
             message,
             client_requests_label_enrichment,
         );
-        let tool_call_notifier = ToolCallNotifier::new(cx, session_id);
         tool_call_notifier.send_initial(initial_tool_call)?;
 
         if !client_requests_label_enrichment {
@@ -1508,17 +1517,45 @@ impl AcpConnection {
         &self,
         tool_response: &ToolResponse,
         tool_request: Option<&ToolRequest>,
-        session_id: &SessionId,
-        cx: &ConnectionTo<Client>,
+        tool_call_notifier: &ToolCallNotifier,
     ) -> Result<(), agent_client_protocol::Error> {
         let fields = tool_call_update_fields_from_response(tool_response, tool_request);
 
         let update = ToolCallUpdate::new(ToolCallId::new(tool_response.id.clone()), fields)
             .meta(tool_response_meta(tool_response));
-        let tool_call_notifier = ToolCallNotifier::new(cx, session_id);
         tool_call_notifier.send_update(update)?;
 
         Ok(())
+    }
+
+    /// Marks a request a subagent forwarded to this session with `_meta.goose.subagentSessionId`.
+    fn mark_forwarding_subagent(
+        &self,
+        mut meta: Meta,
+        session_id: &SessionId,
+        request_id: &str,
+    ) -> Meta {
+        let Ok((origin, _)) = self
+            .services
+            .session_manager
+            .action_required()
+            .answered_request(session_id.0.as_ref(), request_id)
+        else {
+            return meta;
+        };
+        if origin == session_id.0.as_ref() {
+            return meta;
+        }
+        let goose = meta
+            .entry("goose".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(goose) = goose {
+            goose.insert(
+                "subagentSessionId".to_string(),
+                serde_json::Value::String(origin),
+            );
+        }
+        meta
     }
 
     fn handle_tool_permission_request(
@@ -1553,8 +1590,12 @@ impl AcpConnection {
             option(PermissionOptionKind::RejectAlways),
         ];
 
-        let permission_request =
+        let meta = self.mark_forwarding_subagent(Meta::new(), &session_id, &request.request_id);
+        let mut permission_request =
             RequestPermissionRequest::new(session_id, tool_call_update, options);
+        if !meta.is_empty() {
+            permission_request = permission_request.meta(meta);
+        }
         let request_id = request.request_id;
         let services = Arc::clone(&self.services);
 
@@ -2038,6 +2079,7 @@ impl AcpConnection {
         cx: &ConnectionTo<Client>,
         acp_session_id: &SessionId,
         session_id: &str,
+        parent_session_id: Option<&str>,
         cached_context_limit: &mut Option<usize>,
     ) -> Result<Session, agent_client_protocol::Error> {
         let session = self
@@ -2064,10 +2106,9 @@ impl AcpConnection {
         if self.supports_goose_custom_notifications() {
             cx.send_notification(updates.custom)?;
         }
-        cx.send_notification(SessionNotification::new(
-            acp_session_id.clone(),
-            SessionUpdate::UsageUpdate(updates.standard),
-        ))?;
+        ToolCallNotifier::new(cx, acp_session_id)
+            .for_subagent_of(parent_session_id)
+            .send(SessionUpdate::UsageUpdate(updates.standard))?;
 
         Ok(session)
     }
@@ -2088,9 +2129,26 @@ impl AcpConnection {
         let target = SessionTarget {
             session_id: session_id.to_string(),
             cancel_token: Some(cancel_token.clone()),
+            parent_session_id: None,
         };
+        let mut subagent_events = self.services.subagent_events.subscribe(session_id);
+        let mut subagent_streams = HashMap::new();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            // The parent goes first so a delegate's result, which names the subagent, reaches the
+            // client before that subagent's own updates.
+            let event = tokio::select! {
+                biased;
+                event = stream.next() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+                Some(live) = subagent_events.recv() => {
+                    self.forward_subagent_event(cx, &live, &mut subagent_streams)
+                        .await?;
+                    continue;
+                }
+            };
             if cancel_token.is_cancelled() {
                 continue;
             }
@@ -2167,6 +2225,7 @@ impl AcpConnection {
                             cx,
                             acp_session_id,
                             session_id,
+                            None,
                             &mut context_limit,
                         )
                         .await
@@ -2192,6 +2251,24 @@ impl AcpConnection {
                         .data(format!("Error in agent response stream: {error}")));
                 }
             }
+        }
+
+        while let Some(live) = subagent_events.try_recv() {
+            self.forward_subagent_event(cx, &live, &mut subagent_streams)
+                .await?;
+        }
+        // Subagents still open here were aborted with the turn; their tasks report it later.
+        let aborted: Vec<_> = subagent_streams
+            .iter()
+            .map(|(subagent_id, stream)| SubagentLiveEvent {
+                subagent_session_id: subagent_id.clone(),
+                parent_session_id: stream.parent_session_id.clone(),
+                update: SubagentLiveUpdate::Finished(SubagentOutcome::Cancelled),
+            })
+            .collect();
+        for live in aborted {
+            self.forward_subagent_event(cx, &live, &mut subagent_streams)
+                .await?;
         }
 
         let was_cancelled = cancel_token.is_cancelled();
@@ -2227,6 +2304,122 @@ impl AcpConnection {
             was_cancelled,
             output_token_limit_reached,
         })
+    }
+
+    async fn forward_subagent_event(
+        &self,
+        cx: &ConnectionTo<Client>,
+        live: &SubagentLiveEvent,
+        streams: &mut HashMap<String, SubagentStream>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let subagent_id = live.subagent_session_id.as_str();
+        let parent_id = live.parent_session_id.as_str();
+        let acp_session_id = SessionId::new(subagent_id);
+        let notifier = ToolCallNotifier::new(cx, &acp_session_id).for_subagent_of(Some(parent_id));
+        let event = match &live.update {
+            SubagentLiveUpdate::Started { run_id } => {
+                streams.insert(
+                    subagent_id.to_string(),
+                    SubagentStream {
+                        parent_session_id: parent_id.to_string(),
+                        ..SubagentStream::default()
+                    },
+                );
+                return notifier.send(SessionUpdate::SessionInfoUpdate(
+                    SessionInfoUpdate::new().meta(Self::subagent_run_meta(Some(run_id), None)),
+                ));
+            }
+            SubagentLiveUpdate::Finished(outcome) => {
+                streams.remove(subagent_id);
+                return notifier.send(SessionUpdate::SessionInfoUpdate(
+                    SessionInfoUpdate::new().meta(Self::subagent_run_meta(None, Some(outcome))),
+                ));
+            }
+            SubagentLiveUpdate::Event(event) => event.as_ref(),
+        };
+        let stream = streams
+            .entry(subagent_id.to_string())
+            .or_insert_with(|| SubagentStream {
+                parent_session_id: parent_id.to_string(),
+                ..SubagentStream::default()
+            });
+        match event {
+            crate::agents::AgentEvent::Message(message) => {
+                let target = SessionTarget {
+                    session_id: subagent_id.to_string(),
+                    cancel_token: None,
+                    parent_session_id: Some(parent_id.to_string()),
+                };
+                for content_item in &message.content {
+                    match content_item {
+                        MessageContent::ActionRequired(_) => continue,
+                        MessageContent::ToolRequest(tool_request) => {
+                            stream
+                                .tool_requests
+                                .insert(tool_request.id.clone(), tool_request.clone());
+                        }
+                        _ => {}
+                    }
+                    self.handle_message_content(
+                        content_item,
+                        message,
+                        &acp_session_id,
+                        &target,
+                        &stream.tool_requests,
+                        cx,
+                    )
+                    .await?;
+                }
+            }
+            crate::agents::AgentEvent::McpNotification((request_id, notification)) => {
+                if let Some(update) = tool_notifications::tool_notification_update(
+                    request_id.clone(),
+                    notification.clone(),
+                ) {
+                    notifier.send_update(update)?;
+                }
+            }
+            crate::agents::AgentEvent::MessageUsage { message_id, usage } => {
+                if self.supports_goose_custom_notifications() {
+                    cx.send_notification(GooseSessionNotification {
+                        session_id: subagent_id.to_string(),
+                        update: GooseSessionUpdate::MessageUsage(message_usage_update(
+                            message_id.clone(),
+                            usage,
+                        )),
+                    })?;
+                }
+            }
+            crate::agents::AgentEvent::Usage(_) => {
+                // Like the parent's mid-turn update, a failure must not abort the turn.
+                let _ = self
+                    .send_session_usage_updates(
+                        cx,
+                        &acp_session_id,
+                        subagent_id,
+                        Some(parent_id),
+                        &mut stream.context_limit,
+                    )
+                    .await;
+            }
+            crate::agents::AgentEvent::HistoryReplaced(_) => {}
+        }
+        Ok(())
+    }
+
+    fn subagent_run_meta(run_id: Option<&str>, outcome: Option<&SubagentOutcome>) -> Meta {
+        let mut meta = Self::active_run_meta(run_id);
+        if let (Some(outcome), Some(serde_json::Value::Object(goose))) =
+            (outcome, meta.get_mut("goose"))
+        {
+            let outcome = match outcome {
+                SubagentOutcome::Completed(_) => "completed",
+                SubagentOutcome::Failed(_) => "failed",
+                SubagentOutcome::Cancelled => "cancelled",
+            };
+            goose.insert("subagentOutcome".to_string(), outcome.into());
+        }
+        meta
     }
 
     async fn on_load_session(
@@ -2315,7 +2508,7 @@ impl AcpConnection {
         self.clear_active_run(&session_id, &run_id).await;
         Self::send_active_run_update(cx, &args.session_id, None)?;
         let usage_result = self
-            .send_session_usage_updates(cx, &args.session_id, &session_id, &mut None)
+            .send_session_usage_updates(cx, &args.session_id, &session_id, None, &mut None)
             .await;
         let outcome = stream_result?;
         let session = usage_result?;
@@ -3866,5 +4059,213 @@ print(\"hello, world\")
             .await
             .unwrap();
         client.await.unwrap().unwrap();
+    }
+
+    async fn connection_without_provider(root: &Path) -> Arc<AcpConnection> {
+        let services = StateMachineServices::with_config(acp_services_config(
+            Arc::new(SessionManager::new(root.to_path_buf())),
+            root.to_path_buf(),
+            true,
+            GoosePlatform::GooseCli,
+        ));
+        let live_voice = Arc::new(LiveVoiceService::from_config(services.runtime.runs.clone()));
+        let provider_factory: AcpProviderFactory = Arc::new(|_provider_name| {
+            Box::pin(async { Err(anyhow::anyhow!("unused provider factory")) })
+        });
+        Arc::new(
+            AcpConnection::new(AcpConnectionOptions {
+                provider_factory,
+                builtin_selection: AcpBuiltinSelection::default(),
+                config_dir: root.to_path_buf(),
+                services,
+                additional_source_roots: Vec::new(),
+                session_cwd: None,
+                live_voice,
+            })
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_request_forwarded_by_a_subagent_names_it() {
+        let root = tempfile::tempdir().unwrap();
+        let server = connection_without_provider(root.path()).await;
+        let forwarded = server.services.session_manager.action_required().forward(
+            "parent",
+            "child",
+            "inner-request",
+        );
+        let parent = SessionId::new("parent");
+
+        let meta = server.mark_forwarding_subagent(Meta::new(), &parent, &forwarded);
+        assert_eq!(meta["goose"]["subagentSessionId"], "child");
+        assert!(server
+            .mark_forwarding_subagent(Meta::new(), &parent, "own-request")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_parent_prompt_streams_its_subagents_events_under_their_own_session() {
+        use crate::agents::subagent_events::{SubagentLiveEvent, SubagentLiveUpdate};
+        use goose_agent::subagent::SubagentOutcome;
+
+        let root = tempfile::tempdir().unwrap();
+        let server = connection_without_provider(root.path()).await;
+
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
+        let (notification_tx, mut notification_rx) =
+            mpsc::unbounded_channel::<SessionNotification>();
+        let client = tokio::spawn(async move {
+            Client
+                .builder()
+                .on_receive_notification(
+                    async move |notification: SessionNotification, _cx| {
+                        let _ = notification_tx.send(notification);
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                .connect_to(ByteStreams::new(
+                    client_write.compat_write(),
+                    client_read.compat(),
+                ))
+                .await
+        });
+
+        let parent_id = "parent-session".to_string();
+        let hub = server.services.subagent_events.clone();
+        let mut unrelated = hub.subscribe("another-parent");
+        let server_for_connection = server.clone();
+        SacpAgent
+            .builder()
+            .name("subagent-events-test")
+            .connect_with(
+                ByteStreams::new(server_write.compat_write(), server_read.compat()),
+                async move |cx: ConnectionTo<Client>| {
+                    let publisher = server_for_connection.services.subagent_events.clone();
+                    let orphan = publisher.clone();
+                    let orphan_parent = parent_id.clone();
+                    let parent = parent_id.clone();
+                    let publish = move |update| {
+                        publisher.publish(SubagentLiveEvent {
+                            subagent_session_id: "child-session".to_string(),
+                            parent_session_id: parent.clone(),
+                            update,
+                        })
+                    };
+                    let events = stream::once(async move {
+                        publish(SubagentLiveUpdate::Started {
+                            run_id: "subagent_1".to_string(),
+                        });
+                        for message in [
+                            Message::assistant()
+                                .with_id("m1")
+                                .with_text("child says hi"),
+                            Message::assistant()
+                                .with_id("m2")
+                                .with_thinking("pondering", ""),
+                            Message::assistant().with_id("m3").with_tool_request(
+                                "call-1",
+                                Ok(rmcp::model::CallToolRequestParams::new("shell")),
+                            ),
+                        ] {
+                            publish(SubagentLiveUpdate::Event(Box::new(
+                                crate::agents::AgentEvent::Message(message),
+                            )));
+                        }
+                        publish(SubagentLiveUpdate::Finished(SubagentOutcome::Completed(
+                            "done".to_string(),
+                        )));
+                        orphan.publish(SubagentLiveEvent {
+                            subagent_session_id: "aborted-session".to_string(),
+                            parent_session_id: orphan_parent,
+                            update: SubagentLiveUpdate::Started {
+                                run_id: "subagent_2".to_string(),
+                            },
+                        });
+                    })
+                    .filter_map(|()| async { None::<Result<crate::agents::AgentEvent>> })
+                    .boxed();
+
+                    server_for_connection
+                        .forward_agent_stream(
+                            &cx,
+                            &SessionId::new(parent_id.clone()),
+                            &parent_id,
+                            &CancellationToken::new(),
+                            events,
+                        )
+                        .await
+                        .unwrap();
+
+                    let mut received = Vec::new();
+                    while received.len() < 7 {
+                        received.push(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                notification_rx.recv(),
+                            )
+                            .await
+                            .expect("timed out waiting for subagent updates")
+                            .expect("client notification channel closed"),
+                        );
+                    }
+                    let goose_meta = |meta: &Option<Meta>| {
+                        meta.as_ref()
+                            .and_then(|meta| meta.get("goose"))
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                    assert!(received[..5].iter().all(|notification| notification
+                        .session_id
+                        .0
+                        .as_ref()
+                        == "child-session"));
+                    assert!(received[5..].iter().all(|notification| notification
+                        .session_id
+                        .0
+                        .as_ref()
+                        == "aborted-session"));
+                    let metas: Vec<serde_json::Value> = received
+                        .iter()
+                        .map(|notification| match &notification.update {
+                            SessionUpdate::SessionInfoUpdate(info) => goose_meta(&info.meta),
+                            SessionUpdate::AgentMessageChunk(chunk)
+                            | SessionUpdate::AgentThoughtChunk(chunk) => goose_meta(&chunk.meta),
+                            SessionUpdate::ToolCall(tool_call) => goose_meta(&tool_call.meta),
+                            other => panic!("unexpected update {other:?}"),
+                        })
+                        .collect();
+                    assert!(metas
+                        .iter()
+                        .all(|goose| goose["parentSessionId"] == parent_id.as_str()));
+                    assert_eq!(metas[0]["activeRunId"], "subagent_1");
+                    assert!(matches!(
+                        &received[1].update,
+                        SessionUpdate::AgentMessageChunk(chunk)
+                            if chunk.message_id.as_ref().map(|id| id.0.as_ref()) == Some("m1")
+                    ));
+                    assert_eq!(metas[1]["messageId"], "m1");
+                    assert!(matches!(
+                        &received[2].update,
+                        SessionUpdate::AgentThoughtChunk(_)
+                    ));
+                    assert!(matches!(&received[3].update, SessionUpdate::ToolCall(_)));
+                    assert!(metas[4]["activeRunId"].is_null());
+                    assert_eq!(metas[4]["subagentOutcome"], "completed");
+                    assert_eq!(metas[5]["activeRunId"], "subagent_2");
+                    assert!(metas[6]["activeRunId"].is_null());
+                    assert_eq!(metas[6]["subagentOutcome"], "cancelled");
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        client.await.unwrap().unwrap();
+
+        assert!(unrelated.try_recv().is_none());
+        assert_eq!(hub.subscriber_count(), 1);
     }
 }
