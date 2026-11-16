@@ -15,8 +15,8 @@ describe('describeSubagentCoordinationTool', () => {
   it.each([
     ['ask_parent', { question: 'Which branch?' }, { kind: 'askParent', question: 'Which branch?' }],
     [
-      'subagent__ask_parent',
-      { message: 'Which branch?' },
+      'summon__ask_parent',
+      { question: 'Which branch?' },
       { kind: 'askParent', question: 'Which branch?' },
     ],
     [
@@ -25,27 +25,20 @@ describe('describeSubagentCoordinationTool', () => {
       { kind: 'steerSubagent', subagentSessionId: '20251115_7', message: 'Skip docs' },
     ],
     [
-      'platform__steer_subagent',
-      { subagent_session_id: 's-1', action: 'wrap_up' },
+      'summon__steer_subagent',
+      { session_id: 's-1', wrap_up: true },
       { kind: 'wrapUpSubagent', subagentSessionId: 's-1' },
-    ],
-    [
-      'wrap_up_subagent',
-      { subagent_id: 's-1' },
-      { kind: 'wrapUpSubagent', subagentSessionId: 's-1' },
-    ],
-    [
-      'answer_subagent',
-      { session_id: 's-1', answer: 'Use main' },
-      { kind: 'answerSubagent', subagentSessionId: 's-1', message: 'Use main' },
     ],
   ])('reads %s', (name, args, expected) => {
     expect(describeSubagentCoordinationTool(name, args)).toEqual(expected);
   });
 
-  it.each(['delegate', 'developer__shell', 'list_subagents'])('ignores %s', (name) => {
-    expect(describeSubagentCoordinationTool(name, { message: 'hi' })).toBeNull();
-  });
+  it.each(['delegate', 'developer__shell', 'list_subagents', 'message_child', 'answer_subagent'])(
+    'ignores %s',
+    (name) => {
+      expect(describeSubagentCoordinationTool(name, { message: 'hi' })).toBeNull();
+    }
+  );
 });
 
 function toolRequest(name: string, args: Record<string, unknown>): ToolRequestMessageContent {
@@ -94,7 +87,7 @@ describe('coordination tool calls in the transcript', () => {
       id: '20251115_7',
       name: 'Test reviewer',
     } as never);
-    renderToolCall('wrap_up_subagent', { session_id: '20251115_7' });
+    renderToolCall('steer_subagent', { session_id: '20251115_7', wrap_up: true });
     expect(screen.getByText('Asked subagent Test reviewer to wrap up')).toBeInTheDocument();
   });
 });
