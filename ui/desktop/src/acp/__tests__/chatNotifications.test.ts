@@ -93,6 +93,9 @@ function snapshotWithName(name: string): AcpChatSessionSnapshot {
     pendingCancelPromptAttemptId: null,
     parentSessionId: null,
     subagentOutcome: null,
+    providerId: null,
+    modelId: null,
+    pendingSubagentInputs: [],
   };
 }
 
@@ -117,6 +120,9 @@ function snapshotWithoutSession(): AcpChatSessionSnapshot {
     pendingCancelPromptAttemptId: null,
     parentSessionId: null,
     subagentOutcome: null,
+    providerId: null,
+    modelId: null,
+    pendingSubagentInputs: [],
   };
 }
 

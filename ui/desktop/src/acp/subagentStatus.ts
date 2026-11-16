@@ -1,4 +1,3 @@
-import { ChatState } from '../types/chatState';
 import type { Message } from '../types/message';
 import type { AcpChatSessionSnapshot } from './chatSessionStore';
 
@@ -10,6 +9,7 @@ export function isSubagentRunning(snapshot: AcpChatSessionSnapshot | undefined):
 }
 
 export function getSubagentStatus(
+  subagentSessionId: string,
   snapshot: AcpChatSessionSnapshot | undefined,
   parentSnapshot: AcpChatSessionSnapshot | undefined
 ): SubagentStatus | null {
@@ -30,11 +30,10 @@ export function getSubagentStatus(
     return null;
   }
 
-  // Subagent approvals are forwarded to the parent session, so the parent waiting
-  // on input while this subagent has an unanswered tool call means it is blocked on it.
   if (
-    parentSnapshot?.chatState === ChatState.WaitingForUserInput &&
-    hasUnansweredToolRequest(snapshot.messages)
+    parentSnapshot?.pendingSubagentInputs.some(
+      (input) => input.subagentSessionId === subagentSessionId
+    )
   ) {
     return 'waitingForApproval';
   }
@@ -48,19 +47,36 @@ export function getSubagentStatus(
   return 'running';
 }
 
-function hasUnansweredToolRequest(messages: Message[]): boolean {
-  const answered = new Set<string>();
-  const requested: string[] = [];
-
-  for (const message of messages) {
-    for (const content of message.content) {
-      if (content.type === 'toolRequest') {
-        requested.push(content.id);
-      } else if (content.type === 'toolResponse') {
-        answered.add(content.id);
-      }
-    }
+// Forwarded approvals live in the parent session (answering them goes through the
+// parent's pending request), so the subagent view shows the parent's messages for them.
+export function getPendingSubagentInputMessages(
+  subagentSessionId: string,
+  parentSnapshot: AcpChatSessionSnapshot | undefined
+): Message[] {
+  if (!parentSnapshot) {
+    return [];
   }
 
-  return requested.some((id) => !answered.has(id));
+  const messageIds = new Set(
+    parentSnapshot.pendingSubagentInputs
+      .filter((input) => input.subagentSessionId === subagentSessionId)
+      .map((input) => input.messageId)
+  );
+  if (messageIds.size === 0) {
+    return [];
+  }
+
+  return parentSnapshot.messages.filter((message) => message.id && messageIds.has(message.id));
+}
+
+export interface SubagentModel {
+  providerId: string | null;
+  modelId: string | null;
+}
+
+export function getSubagentModel(snapshot: AcpChatSessionSnapshot | undefined): SubagentModel {
+  return {
+    providerId: snapshot?.providerId ?? snapshot?.session?.provider_name ?? null,
+    modelId: snapshot?.modelId ?? snapshot?.session?.model_config?.model_name ?? null,
+  };
 }

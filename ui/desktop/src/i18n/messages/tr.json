@@ -4307,11 +4307,53 @@
   "subRecipeModal.subtitle": {
     "defaultMessage": "Tarif yürütme sırasında araç olarak çağrılabilecek bir alt tarif yapılandırın"
   },
+  "subagentCoordination.answeredSubagent": {
+    "defaultMessage": "Answered subagent {subagent}: {message}"
+  },
+  "subagentCoordination.askedParent": {
+    "defaultMessage": "Asked the parent: {question}"
+  },
+  "subagentCoordination.askedSubagentToWrapUp": {
+    "defaultMessage": "Asked subagent {subagent} to wrap up"
+  },
+  "subagentCoordination.toldSubagent": {
+    "defaultMessage": "Told subagent {subagent}: {message}"
+  },
+  "subagentModelSection.chooseModel": {
+    "defaultMessage": "Choose model"
+  },
+  "subagentModelSection.description": {
+    "defaultMessage": "Subagents use a model the agent names when delegating first, then recipe settings, then this default, then the main chat model."
+  },
+  "subagentModelSection.modalDescription": {
+    "defaultMessage": "Select the provider and model new subagents use by default."
+  },
+  "subagentModelSection.modalTitle": {
+    "defaultMessage": "Subagent default model"
+  },
+  "subagentModelSection.sameAsMainChat": {
+    "defaultMessage": "Same as main chat"
+  },
+  "subagentModelSection.saveFailed": {
+    "defaultMessage": "Couldn't save the subagent default model"
+  },
+  "subagentModelSection.title": {
+    "defaultMessage": "Subagent default model"
+  },
+  "subagentModelsSection.title": {
+    "defaultMessage": "Subagent models"
+  },
   "subagentRunControls.completed": {
     "defaultMessage": "Completed"
   },
   "subagentRunControls.failed": {
     "defaultMessage": "Failed"
+  },
+  "subagentRunControls.model": {
+    "defaultMessage": "Model"
+  },
+  "subagentRunControls.modelBadgeLabel": {
+    "defaultMessage": "Subagent model: {model}"
   },
   "subagentRunControls.readOnly": {
     "defaultMessage": "This subagent has finished. Its transcript is read-only."
@@ -4333,6 +4375,15 @@
   },
   "subagentRunControls.stopped": {
     "defaultMessage": "Stopped"
+  },
+  "subagentRunControls.switchModelDescription": {
+    "defaultMessage": "The subagent uses the new model from its next model call, or restarts on it with its work so far."
+  },
+  "subagentRunControls.switchModelLabel": {
+    "defaultMessage": "Switch the subagent model"
+  },
+  "subagentRunControls.switchModelTitle": {
+    "defaultMessage": "Switch subagent model"
   },
   "subagentRunControls.thinking": {
     "defaultMessage": "Thinking"

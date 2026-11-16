@@ -19,6 +19,7 @@ import {
   getGooseActiveRunId,
   getGooseParentSessionId,
   getGooseQueuedSteer,
+  getGooseSessionModel,
   getGooseSubagentOutcome,
 } from './adapter/shared';
 import { applyToolCall, applyToolCallUpdate } from './adapter/tools';
@@ -94,15 +95,23 @@ function applyAcpSessionNotification(
       const queuedSteerMessageId = getGooseQueuedSteer(update);
       const parentSessionId = getGooseParentSessionId(update);
       const subagentOutcome = getGooseSubagentOutcome(update);
+      const sessionModel = getGooseSessionModel(update);
       const changes: AcpChatStateChange[] = [];
 
-      if (update.title || activeRunId !== undefined || parentSessionId) {
+      if (
+        update.title ||
+        activeRunId !== undefined ||
+        parentSessionId ||
+        sessionModel.providerId ||
+        sessionModel.modelId
+      ) {
         changes.push({
           type: 'sessionInfo',
           ...(update.title ? { name: update.title } : {}),
           ...(activeRunId !== undefined ? { activeRunId } : {}),
           ...(parentSessionId ? { parentSessionId } : {}),
           ...(subagentOutcome ? { subagentOutcome } : {}),
+          ...sessionModel,
         });
       }
 

@@ -116,6 +116,9 @@ function snapshotWithActivePrompt(activePromptAttemptId: string | null): AcpChat
     pendingCancelPromptAttemptId: null,
     parentSessionId: null,
     subagentOutcome: null,
+    providerId: null,
+    modelId: null,
+    pendingSubagentInputs: [],
   };
 }
 
