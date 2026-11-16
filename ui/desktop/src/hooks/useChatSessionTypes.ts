@@ -1,3 +1,4 @@
+import type { SubagentOutcome } from '../acp/adapter/shared';
 import type { ChatState } from '../types/chatState';
 import type { TokenState } from '../types/chat';
 import type { ImageData, Message, NotificationEvent, UserInput } from '../types/message';
@@ -30,6 +31,8 @@ export interface UseChatSessionResult {
   pauseQueueOnStop: boolean;
   queueProcessingBlocked: boolean;
   hasActiveRun: boolean;
+  parentSessionId: string | null;
+  subagentOutcome: SubagentOutcome | null;
   onMessageUpdate: (
     messageId: string,
     newContent: string,
