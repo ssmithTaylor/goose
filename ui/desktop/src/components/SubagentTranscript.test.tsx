@@ -195,6 +195,60 @@ describe('SubagentTranscript in the delegate tool card', () => {
     expect(screen.getByTestId('subagent-model')).toHaveTextContent('openai / gpt-5');
   });
 
+  it('shows the routing capability and tier with the reason on focus', async () => {
+    await runStarted({
+      provider: 'anthropic',
+      model: 'claude-sonnet',
+      routing: { capability: 'code', tier: 'balanced', reason: 'Single-file fix' },
+    });
+    renderDelegateCard();
+
+    const badge = screen.getByTestId('subagent-model');
+    expect(badge).toHaveTextContent(/^code · balanced · claude-sonnet$/);
+    expect(badge).toHaveAccessibleDescription('Why this model: Single-file fix');
+    expect(screen.getByRole('button', { name: /Subagent/ })).not.toContainElement(badge);
+
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    act(() => badge.focus());
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Why this model: Single-file fix');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the plain model badge when the routing table did not choose the model', async () => {
+    await runStarted({
+      provider: 'anthropic',
+      model: 'claude-sonnet',
+      routing: { capability: 'code', tier: 'balanced', reason: 'Single-file fix' },
+    });
+    renderDelegateCard();
+    expect(screen.getByTestId('subagent-model')).toHaveTextContent('code · balanced');
+
+    await runStarted({ provider: 'openai', model: 'gpt-5' });
+    const badge = screen.getByTestId('subagent-model');
+    expect(badge).toHaveTextContent(/^openai \/ gpt-5$/);
+    expect(badge).not.toHaveAttribute('tabindex');
+  });
+
+  it('drops the routing label when the user switches the model', async () => {
+    await runStarted({
+      provider: 'anthropic',
+      model: 'claude-sonnet',
+      routing: { capability: 'code', tier: 'balanced', reason: 'Single-file fix' },
+    });
+    renderDelegateCard();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch the subagent model' }));
+    act(() => switchModelModal.mock.calls.at(-1)![0].onModelSelected?.('gpt-5', 'openai'));
+    expect(screen.getByTestId('subagent-model')).toHaveTextContent(/^openai \/ gpt-5$/);
+  });
+
   it('switches the running subagent model and keeps one subagent when it restarts', async () => {
     await runStarted({ provider: 'anthropic', model: 'claude-sonnet' });
     client.goose.sessionSteer_unstable.mockResolvedValue({ messageId: 'steer-2' });

@@ -50,6 +50,7 @@ function renderChatSession(messages: Message[], parentSessionId: string | null =
     subagentOutcome: null,
     providerId: null,
     modelId: null,
+    routing: null,
     pendingSubagentInputs: [],
   };
   return renderHook(() => useChatSession({ sessionId: 'sess-1', onStreamFinish: vi.fn() }), {

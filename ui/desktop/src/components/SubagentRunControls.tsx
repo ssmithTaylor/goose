@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import {
   Bot,
   CircleAlert,
@@ -21,6 +21,7 @@ import { useNavigation } from '../hooks/useNavigation';
 import { SwitchModelModal } from './settings/models/subcomponents/SwitchModelModal';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/Tooltip';
 import { cn } from '../utils';
 
 const i18n = defineMessages({
@@ -89,7 +90,18 @@ const i18n = defineMessages({
     id: 'subagentRunControls.modelBadgeLabel',
     defaultMessage: 'Subagent model: {model}',
   },
+  routedModel: {
+    id: 'subagentRunControls.routedModel',
+    defaultMessage: '{capability} · {tier} · {model}',
+  },
+  routingReason: {
+    id: 'subagentRunControls.routingReason',
+    defaultMessage: 'Why this model: {reason}',
+  },
 });
+
+const badgeClassName =
+  'min-w-0 truncate rounded-full border border-border-primary bg-background-secondary px-2 py-0.5 text-xs text-text-secondary';
 
 export function SubagentModelBadge({
   subagentSessionId,
@@ -99,23 +111,59 @@ export function SubagentModelBadge({
   className?: string;
 }) {
   const intl = useIntl();
-  const { providerId, modelId } = getSubagentModel(useAcpChatSessionSnapshot(subagentSessionId));
+  const reasonId = useId();
+  const snapshot = useAcpChatSessionSnapshot(subagentSessionId);
+  const { providerId, modelId } = getSubagentModel(snapshot);
+  const routing = snapshot?.routing ?? null;
   const label = [providerId, modelId].filter(Boolean).join(' / ');
   if (!label) {
     return null;
   }
 
+  const title = intl.formatMessage(i18n.modelBadgeLabel, { model: label });
+  if (!routing) {
+    return (
+      <span data-testid="subagent-model" title={title} className={cn(badgeClassName, className)}>
+        {label}
+      </span>
+    );
+  }
+
+  const routedLabel = intl.formatMessage(i18n.routedModel, {
+    capability: routing.capability,
+    tier: routing.tier,
+    model: modelId ?? label,
+  });
+  if (!routing.reason) {
+    return (
+      <span data-testid="subagent-model" title={title} className={cn(badgeClassName, className)}>
+        {routedLabel}
+      </span>
+    );
+  }
+
+  const reason = intl.formatMessage(i18n.routingReason, { reason: routing.reason });
   return (
-    <span
-      data-testid="subagent-model"
-      title={intl.formatMessage(i18n.modelBadgeLabel, { model: label })}
-      className={cn(
-        'min-w-0 truncate rounded-full border border-border-primary bg-background-secondary px-2 py-0.5 text-xs text-text-secondary',
-        className
-      )}
-    >
-      {label}
-    </span>
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-testid="subagent-model"
+            tabIndex={0}
+            aria-describedby={reasonId}
+            className={cn(badgeClassName, 'cursor-default', className)}
+          >
+            {routedLabel}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-xs">
+          {reason}
+        </TooltipContent>
+      </Tooltip>
+      <span id={reasonId} className="sr-only">
+        {reason}
+      </span>
+    </>
   );
 }
 

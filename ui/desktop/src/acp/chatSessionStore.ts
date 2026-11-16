@@ -17,6 +17,7 @@ import {
   getGooseParentSessionId,
   getGooseSubagentSessionId,
   type SubagentOutcome,
+  type SubagentRouting,
 } from './adapter/shared';
 import type { AcpElicitationRequest } from './elicitationRequests';
 import type { AcpPermissionRequest } from './permissionRequestTypes';
@@ -36,6 +37,7 @@ export interface AcpChatSessionSnapshot {
   subagentOutcome: SubagentOutcome | null;
   providerId: string | null;
   modelId: string | null;
+  routing: SubagentRouting | null;
   pendingSubagentInputs: PendingSubagentInput[];
 }
 
@@ -258,6 +260,7 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
       subagentOutcome: null,
       providerId: null,
       modelId: null,
+      routing: null,
       promptCancellationRestoreState: null,
       pendingUserInputRequestIds: new Set(),
       subagentInputsByRequestId: new Map(),
@@ -301,6 +304,9 @@ function createAcpChatSessionStoreInternal(): AcpChatSessionStoreInternal {
     modelId
   ) => {
     const entry = getOrCreateEntry(sessionId);
+    if ((providerId && providerId !== entry.providerId) || (modelId && modelId !== entry.modelId)) {
+      entry.routing = null;
+    }
     entry.providerId = providerId ?? entry.providerId;
     entry.modelId = modelId ?? entry.modelId;
     return notify(sessionId, entry);
@@ -813,6 +819,9 @@ function applyChatStateChanges(entry: StoreEntry, changes: AcpChatStateChange[])
         if (change.modelId) {
           entry.modelId = change.modelId;
         }
+        if (change.routing !== undefined) {
+          entry.routing = change.routing;
+        }
         if (change.activeRunId !== undefined) {
           entry.activeRunId = change.activeRunId;
           applySubagentRunChange(entry, change.subagentOutcome);
@@ -980,6 +989,7 @@ function snapshotFromEntry(entry: StoreEntry): AcpChatSessionSnapshot {
     subagentOutcome: entry.subagentOutcome,
     providerId: entry.providerId,
     modelId: entry.modelId,
+    routing: entry.routing,
     pendingSubagentInputs: pendingSubagentInputs(entry),
   };
 }

@@ -113,8 +113,8 @@ export function SubagentTranscript({
           <Bot className="size-3.5 shrink-0 text-text-secondary" />
           <span className="font-sans text-sm">{intl.formatMessage(i18n.subagent)}</span>
           {status && <SubagentStatusLabel status={status} />}
-          <SubagentModelBadge subagentSessionId={subagentSessionId} />
         </Button>
+        <SubagentModelBadge subagentSessionId={subagentSessionId} />
         <Button
           variant="ghost"
           size="xs"
