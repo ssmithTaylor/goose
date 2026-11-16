@@ -198,7 +198,7 @@ pub(crate) fn build_state_machine(config: StateMachineConfig<'_>) -> GooseStateM
     });
 
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
-        Arc::new(FinalOutputOperation::new(provider.clone())),
+        Arc::new(FinalOutputOperation::new(provider.clone()).with_subagents(subagents.clone())),
         Arc::new(
             ToolApprovalOperation::new(Arc::new(GooseToolApproval::new(
                 tool_inspection_manager,

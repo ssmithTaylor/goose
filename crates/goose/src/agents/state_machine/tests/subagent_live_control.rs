@@ -236,8 +236,9 @@ async fn stopping_one_subagent_leaves_its_sibling_and_the_parent_running() -> Re
         .unwrap()
         .messages()
         .iter()
-        .any(|message| message.as_concat_text()
-            == format!("Subagent {alpha_id} was cancelled before it finished.")));
+        .any(|message| message.as_concat_text().contains(&format!(
+            "Subagent {alpha_id} was cancelled before it finished."
+        ))));
     assert_eq!(services.runtime.runs.agent_run_id(&alpha_id), None);
     assert_eq!(services.runtime.runs.agent_run_id(&beta_id), None);
     Ok(())

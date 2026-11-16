@@ -239,7 +239,7 @@ settings:
         .call("delegate", json!({ "source": "bounded" }));
     api.on("Keep taking actions")
         .unadvertised_call("keep_working", json!({}));
-    let failure = format!("failed: {MAX_TURNS_MESSAGE}");
+    let failure = format!("Why it stopped:\n{MAX_TURNS_MESSAGE}");
     api.on(&failure).reply("child stopped on time");
 
     let result = pipeline.run(["Delegate the bounded child"]).await?;

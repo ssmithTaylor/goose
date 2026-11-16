@@ -136,7 +136,10 @@ async fn agent_with_calculator(
     Ok((services, api, session_id, calculator, temp_dir))
 }
 
-async fn enable_developer(services: &Arc<StateMachineServices>, session_id: &str) -> Result<()> {
+pub(super) async fn enable_developer(
+    services: &Arc<StateMachineServices>,
+    session_id: &str,
+) -> Result<()> {
     services
         .extension_manager
         .enable(

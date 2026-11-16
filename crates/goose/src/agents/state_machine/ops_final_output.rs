@@ -14,7 +14,7 @@ use crate::agents::state_machine::ops_recipe::command_error;
 use crate::agents::state_machine::ops_toolcalling::{request_was_advertised, tool_span};
 use crate::agents::state_machine::{
     applied, ends_turn, messages_since_kickoff, not_applicable, Emitter, GooseEffect, Operation,
-    OperationResult,
+    OperationResult, SubagentOperation,
 };
 use crate::conversation::message::{Message, MessageContent, ToolRequest};
 use crate::conversation::Conversation;
@@ -84,13 +84,39 @@ fn has_sibling_tool_calls(messages: &[Message], request_id: &str) -> bool {
         .any(|request| request.id != request_id && !request.was_executed_externally())
 }
 
+fn waiting_for_subagents_message(subagent_ids: &[String]) -> String {
+    format!(
+        "Subagents {} have not reported yet. End your turn without {FINAL_OUTPUT_TOOL_NAME}: \
+         their results arrive then. Call {FINAL_OUTPUT_TOOL_NAME} after you have read them.",
+        subagent_ids.join(", ")
+    )
+}
+
 pub struct FinalOutputOperation {
     provider: Arc<dyn Provider>,
+    subagents: Option<Arc<SubagentOperation<Session>>>,
 }
 
 impl FinalOutputOperation {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            subagents: None,
+        }
+    }
+
+    /// Holds the final output back until every subagent `subagents` runs has reported, so the
+    /// output accounts for them and comes once.
+    pub(crate) fn with_subagents(mut self, subagents: Arc<SubagentOperation<Session>>) -> Self {
+        self.subagents = Some(subagents);
+        self
+    }
+
+    fn undelivered_subagents(&self, session: &Session, conversation: &Conversation) -> Vec<String> {
+        self.subagents
+            .as_ref()
+            .map(|subagents| subagents.undelivered_subagents(session, conversation))
+            .unwrap_or_default()
     }
 }
 
@@ -154,6 +180,21 @@ impl Operation<Session, GooseEffect> for FinalOutputOperation {
                 return applied([response.into()]);
             }
 
+            let waiting = self.undelivered_subagents(session, conversation);
+            if !waiting.is_empty() {
+                response.add_tool_response_with_metadata(
+                    request.id,
+                    Err(ErrorData::new(
+                        ErrorCode::INVALID_REQUEST,
+                        waiting_for_subagents_message(&waiting),
+                        None,
+                    )),
+                    request.metadata.as_ref(),
+                );
+                let response = emit.message(response);
+                return applied([response.into()]);
+            }
+
             let tool_call = request
                 .tool_call
                 .clone()
@@ -186,7 +227,7 @@ impl Operation<Session, GooseEffect> for FinalOutputOperation {
             return not_applicable();
         }
 
-        if ends_turn(messages) {
+        if ends_turn(messages) && self.undelivered_subagents(session, conversation).is_empty() {
             let message = Message::user()
                 .with_text(FINAL_OUTPUT_CONTINUATION_MESSAGE)
                 .agent_only();

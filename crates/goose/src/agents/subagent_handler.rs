@@ -131,8 +131,16 @@ impl ForegroundSubagentRunner {
     ) -> BoxStream<'static, SubagentUpdate> {
         let (to_parent, from_subagent) = mpsc::unbounded_channel();
         let cancel = parent_cancel.child_token();
+        let running = self
+            .services
+            .subagent_events
+            .mark_running(&subagent.id, &parent_id);
+        let run = self.clone().run(subagent, parent_id, cancel, to_parent);
         spawn_run(
-            self.clone().run(subagent, parent_id, cancel, to_parent),
+            async move {
+                let _running = running;
+                run.await
+            },
             from_subagent,
         )
     }
@@ -184,12 +192,20 @@ impl ForegroundSubagentRunner {
             let event = event?;
             if let AgentEvent::Message(message) = &event {
                 if asks_for_a_decision(message) {
-                    let _ = to_parent.send(forwarded(
+                    let request = forwarded(
                         message.clone(),
                         parent_id,
                         &subagent.id,
                         self.session_manager(),
-                    ));
+                    )
+                    .with_generated_id_if_missing();
+                    if !self
+                        .services
+                        .runtime
+                        .emit_to_turn(parent_id, AgentEvent::Message(request.clone()))
+                    {
+                        let _ = to_parent.send(request);
+                    }
                 }
             }
             if let Some(event) = user_event(event) {

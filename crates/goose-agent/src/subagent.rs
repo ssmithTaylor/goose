@@ -61,20 +61,45 @@ pub trait SubagentRunner<S>: MaybeSend + MaybeSync {
         _emit: &Emitter,
     ) {
     }
+
+    /// Whether the subagent that `message` started reports only once the parent has ended its
+    /// turn, rather than at the parent's next step. Applies to a parent that keeps working
+    /// while its subagents run (`SubagentOperation::with_parent_working`).
+    fn delivers_when_idle(
+        &self,
+        _parent_session: &S,
+        _message: &Message,
+        _subagent_session_id: &str,
+    ) -> bool {
+        false
+    }
+
+    /// One message reporting every outcome ready at once, with `still_running` naming the
+    /// subagents yet to report. `None` reports each outcome in a message of its own. Used
+    /// with `SubagentOperation::with_wake`.
+    async fn results_message(
+        &self,
+        _parent_session: &S,
+        _outcomes: &[(String, SubagentOutcome)],
+        _still_running: &[String],
+    ) -> Option<Message> {
+        None
+    }
+}
+
+fn note_ids(value: Option<&serde_json::Value>) -> Vec<&str> {
+    match value {
+        Some(serde_json::Value::String(id)) => vec![id.as_str()],
+        Some(serde_json::Value::Array(ids)) => {
+            ids.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn finished_subagent_session_ids(message: &Message) -> impl Iterator<Item = &str> {
-    let delivered = message
-        .metadata
-        .operation_note(OPERATION_NAME, DELIVERED)
-        .and_then(serde_json::Value::as_str);
-    let cancelled = message
-        .metadata
-        .operation_note(OPERATION_NAME, CANCELLED)
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str);
+    let delivered = note_ids(message.metadata.operation_note(OPERATION_NAME, DELIVERED));
+    let cancelled = note_ids(message.metadata.operation_note(OPERATION_NAME, CANCELLED));
     delivered.into_iter().chain(cancelled)
 }
 
@@ -236,6 +261,24 @@ impl<S> SubagentOperation<S> {
         pending
     }
 
+    fn when_idle_subagents(&self, session: &S, conversation: &Conversation) -> HashSet<String> {
+        conversation
+            .messages()
+            .iter()
+            .flat_map(|message| {
+                self.runner
+                    .requested_subagent_session_ids(session, message)
+                    .into_iter()
+                    .filter(|id| self.runner.delivers_when_idle(session, message, id))
+            })
+            .collect()
+    }
+
+    /// The subagents delegated in `conversation` that have not reported yet.
+    pub fn undelivered_subagents(&self, session: &S, conversation: &Conversation) -> Vec<String> {
+        self.pending_subagents(session, conversation)
+    }
+
     fn deliver<E: From<Message>>(
         &self,
         subagent_session_id: &str,
@@ -349,7 +392,7 @@ where
             }
             return not_applicable();
         };
-        self.run_with_wake(&mut running, wake, conversation, remaining, emit)
+        self.run_with_wake(session, &mut running, wake, conversation, &pending, emit)
             .await
     }
 }
@@ -369,16 +412,76 @@ fn take_ready_updates(running: &mut Running, emit: &Emitter) {
     }
 }
 
-impl<S> SubagentOperation<S> {
+impl<S> SubagentOperation<S>
+where
+    S: MaybeSend + MaybeSync + 'static,
+{
+    async fn deliver_ready<E: From<Message>>(
+        &self,
+        session: &S,
+        running: &mut Running,
+        pending: &[String],
+        emit: &Emitter,
+    ) -> Vec<E> {
+        let outcomes: Vec<(String, SubagentOutcome)> = running.finished.drain(..).collect();
+        for (subagent_session_id, _) in &outcomes {
+            running.subagent_session_ids.remove(subagent_session_id);
+        }
+        let still_running: Vec<String> = pending
+            .iter()
+            .filter(|id| !outcomes.iter().any(|(finished, _)| finished == *id))
+            .cloned()
+            .collect();
+        for (subagent_session_id, outcome) in &outcomes {
+            self.runner.on_subagent_finished(
+                subagent_session_id,
+                outcome,
+                still_running.len(),
+                emit,
+            );
+        }
+        let Some(mut message) = self
+            .runner
+            .results_message(session, &outcomes, &still_running)
+            .await
+        else {
+            return outcomes
+                .iter()
+                .filter_map(|(subagent_session_id, outcome)| {
+                    subagent_result_message(subagent_session_id, outcome)
+                })
+                .map(E::from)
+                .collect();
+        };
+        let (cancelled, delivered): (Vec<_>, Vec<_>) = outcomes
+            .iter()
+            .partition(|(_, outcome)| *outcome == SubagentOutcome::Cancelled);
+        let ids = |outcomes: Vec<&(String, SubagentOutcome)>| {
+            serde_json::json!(outcomes.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
+        };
+        if !delivered.is_empty() {
+            message
+                .metadata
+                .set_operation_note(OPERATION_NAME, DELIVERED, ids(delivered));
+        }
+        if !cancelled.is_empty() {
+            message
+                .metadata
+                .set_operation_note(OPERATION_NAME, CANCELLED, ids(cancelled));
+        }
+        vec![E::from(message)]
+    }
+
     /// Waits on the subagents, leaving this step to deliver a result, add queued messages, let
     /// the parent respond to them, and pick up answers to its own tool calls. Nothing goes
     /// between a tool call and its response.
     async fn run_with_wake<E: From<Message>>(
         &self,
+        session: &S,
         running: &mut Running,
         wake: &Wake,
         conversation: &Conversation,
-        remaining: usize,
+        pending: &[String],
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
         if running.subagent_session_ids.is_empty() {
@@ -395,17 +498,25 @@ impl<S> SubagentOperation<S> {
         } else if ends_turn(messages) {
             running.woken = false;
         }
+        let idle = ends_turn(messages);
+        let when_idle = if self.parent_works {
+            self.when_idle_subagents(session, conversation)
+        } else {
+            HashSet::new()
+        };
         loop {
-            if !tool_calls_open {
-                if let Some((subagent_session_id, outcome)) = running.finished.pop_front() {
-                    running.subagent_session_ids.remove(&subagent_session_id);
-                    if let Some(effect) =
-                        self.deliver(&subagent_session_id, &outcome, remaining, emit)
-                    {
-                        return applied([effect]);
-                    }
-                    continue;
+            if !tool_calls_open && !running.finished.is_empty() {
+                let due = !self.parent_works
+                    || idle
+                    || running
+                        .finished
+                        .iter()
+                        .any(|(subagent_session_id, _)| !when_idle.contains(subagent_session_id));
+                if due {
+                    return applied(self.deliver_ready(session, running, pending, emit).await);
                 }
+            }
+            if !tool_calls_open {
                 let steers: Vec<Message> = wake
                     .steers
                     .lock()

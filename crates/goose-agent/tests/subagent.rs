@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +48,8 @@ struct FakeRunner {
     children: Mutex<HashMap<String, Child>>,
     started: Mutex<Vec<String>>,
     events: Mutex<Vec<String>>,
+    when_idle: Mutex<HashSet<String>>,
+    batches: bool,
 }
 
 impl FakeRunner {
@@ -65,6 +67,20 @@ impl FakeRunner {
             .unwrap()
             .insert(subagent_session_id.to_string(), Child::Running(rx));
         RunningChild(tx)
+    }
+
+    fn deliver_when_idle(&self, subagent_session_id: &str) {
+        self.when_idle
+            .lock()
+            .unwrap()
+            .insert(subagent_session_id.to_string());
+    }
+
+    fn batching() -> Self {
+        Self {
+            batches: true,
+            ..Self::default()
+        }
     }
 
     fn started(&self) -> Vec<String> {
@@ -132,6 +148,35 @@ impl SubagentRunner<Parent> for FakeRunner {
         self.events.lock().unwrap().push(format!(
             "finished {subagent_session_id}, {remaining} remaining"
         ));
+    }
+
+    fn delivers_when_idle(
+        &self,
+        _parent_session: &Parent,
+        _message: &Message,
+        subagent_session_id: &str,
+    ) -> bool {
+        self.when_idle.lock().unwrap().contains(subagent_session_id)
+    }
+
+    async fn results_message(
+        &self,
+        _parent_session: &Parent,
+        outcomes: &[(String, SubagentOutcome)],
+        still_running: &[String],
+    ) -> Option<Message> {
+        if !self.batches {
+            return None;
+        }
+        let reported: Vec<String> = outcomes
+            .iter()
+            .map(|(id, outcome)| format!("{id}: {outcome:?}"))
+            .collect();
+        Some(Message::user().with_text(format!(
+            "results [{}] still running [{}]",
+            reported.join(", "),
+            still_running.join(", ")
+        )))
     }
 }
 
@@ -636,13 +681,9 @@ async fn subagents_finishing_during_a_tool_call_are_each_delivered_once_after_it
     interrupt(&operation, &messages);
     messages.push(tool_result("call-1"));
 
-    let mut delivered = Vec::new();
-    for _ in 0..2 {
-        let results = without_waiting(&operation, &messages);
-        assert_eq!(results.len(), 1);
-        delivered.extend(texts(&results));
-        messages.extend(results);
-    }
+    let results = without_waiting(&operation, &messages);
+    let mut delivered = texts(&results);
+    messages.extend(results);
     delivered.sort();
     assert_eq!(
         delivered,
@@ -715,4 +756,102 @@ async fn stopping_a_working_parent_delivers_finished_and_cancels_running_subagen
         ]
     );
     assert!(b.is_closed());
+}
+
+#[tokio::test]
+async fn a_when_idle_result_waits_until_the_parent_ends_its_turn() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    runner.deliver_when_idle("a");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let mut messages = vec![start(&["a"])];
+    assert!(without_waiting(&operation, &messages).is_empty());
+
+    a.finish(SubagentOutcome::Completed("done".into()));
+    for call in ["call-1", "call-2", "call-3"] {
+        messages.push(tool_call(call));
+        messages.push(tool_result(call));
+        assert!(
+            without_waiting(&operation, &messages).is_empty(),
+            "the result interrupted the parent's work"
+        );
+    }
+
+    messages.push(Message::assistant().with_text("my part is done"));
+    assert_eq!(
+        texts(&without_waiting(&operation, &messages)),
+        ["Subagent a completed: done"]
+    );
+}
+
+#[tokio::test]
+async fn an_asap_result_brings_the_other_ready_results_in_one_message() {
+    let runner = Arc::new(FakeRunner::batching());
+    let a = runner.running("a");
+    let b = runner.running("b");
+    let c = runner.running("c");
+    runner.deliver_when_idle("a");
+    let (operation, _signal, _steers) = working_operation(&runner);
+    let mut messages = vec![start(&["a", "b", "c"])];
+    assert!(without_waiting(&operation, &messages).is_empty());
+
+    a.finish(SubagentOutcome::Completed("a done".into()));
+    messages.push(tool_call("call-1"));
+    messages.push(tool_result("call-1"));
+    assert!(without_waiting(&operation, &messages).is_empty());
+
+    b.finish(SubagentOutcome::Cancelled);
+    messages.push(tool_call("call-2"));
+    messages.push(tool_result("call-2"));
+    let delivered = without_waiting(&operation, &messages);
+    assert_eq!(
+        texts(&delivered),
+        [r#"results [a: Completed("a done"), b: Cancelled] still running [c]"#]
+    );
+    assert_eq!(
+        delivered[0]
+            .metadata
+            .operation_note("foreground_subagent", "delivered"),
+        Some(&json!(["a"]))
+    );
+    assert_eq!(
+        delivered[0]
+            .metadata
+            .operation_note("foreground_subagent", "cancelled"),
+        Some(&json!(["b"]))
+    );
+    messages.extend(delivered);
+
+    let conversation = Conversation::new_unvalidated(messages.clone());
+    assert_eq!(
+        operation.undelivered_subagents(&Parent, &conversation),
+        ["c"]
+    );
+    let rebuilt = Arc::new(FakeRunner::default());
+    let _c = rebuilt.running("c");
+    assert!(
+        run_once(&SubagentOperation::new(rebuilt.clone()), &messages)
+            .now_or_never()
+            .is_none()
+    );
+    assert_eq!(rebuilt.started(), ["c"]);
+    drop(c);
+}
+
+#[tokio::test]
+async fn without_a_working_parent_results_arrive_whenever_they_can() {
+    let runner = Arc::new(FakeRunner::default());
+    let a = runner.running("a");
+    runner.deliver_when_idle("a");
+    let (operation, _signal, _steers) = woken_operation(&runner);
+    let mut messages = vec![start(&["a"])];
+    interrupt(&operation, &messages);
+
+    a.finish(SubagentOutcome::Completed("done".into()));
+    messages.push(tool_call("call-1"));
+    messages.push(tool_result("call-1"));
+    assert_eq!(
+        texts(&without_waiting(&operation, &messages)),
+        ["Subagent a completed: done"]
+    );
 }

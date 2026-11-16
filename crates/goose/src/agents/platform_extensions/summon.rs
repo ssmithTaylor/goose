@@ -1,8 +1,15 @@
 use crate::agents::extension::PlatformExtensionContext;
 use crate::agents::final_output_tool::{FinalOutputTool, FINAL_OUTPUT_TOOL_NAME};
 use crate::agents::mcp_client::{Error, McpClientTrait};
-use crate::agents::state_machine::DELEGATED_META_KEY;
-use crate::agents::subagent_coordination::{ASK_PARENT_TOOL_NAME, STEER_SUBAGENT_TOOL_NAME};
+use crate::agents::state_machine::{
+    delegated_subagent_ids, messages_since_kickoff, readable_output, subagent_task, task_snippet,
+    DELEGATED_META_KEY,
+};
+use crate::agents::subagent_coordination::{
+    delegated_text, SubagentDelivery, ASK_PARENT_TOOL_NAME, DELIVER_META_KEY,
+    STEER_SUBAGENT_TOOL_NAME, SUBAGENT_STATUS_TOOL_NAME,
+};
+use crate::agents::subagent_handler::subagent_model;
 use crate::agents::subagent_routing::{
     Route, RoutedModel, RoutingTable, SubagentRoutingState, Tier,
 };
@@ -64,6 +71,7 @@ pub struct DelegateParams {
     pub capability: Option<String>,
     pub tier: Option<Tier>,
     pub routing_reason: Option<String>,
+    pub deliver: Option<SubagentDelivery>,
 }
 
 const DEFAULT_RESUME_INSTRUCTIONS: &str = "Continue the task from where you left off.";
@@ -79,6 +87,22 @@ struct SteerSubagentParams {
 #[derive(Debug, Deserialize)]
 struct AskParentParams {
     question: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SubagentStatusParams {
+    session_id: Option<String>,
+}
+
+fn not_in_this_session(subagent_id: &str) -> String {
+    format!("Subagent {subagent_id} is not running in this session")
+}
+
+fn last_activity(subagent: &Session) -> String {
+    let seconds = (chrono::Utc::now() - subagent.updated_at)
+        .num_seconds()
+        .max(0);
+    format!("last active {seconds}s ago")
 }
 
 fn wrap_up_instruction() -> String {
@@ -365,8 +389,12 @@ pub fn discover_filesystem_sources(working_dir: &Path) -> Vec<SourceEntry> {
     sources
 }
 
-fn delegated_result(text: String, subagent_id: &str) -> CallToolResult {
+fn delegated_result(text: String, subagent_id: &str, deliver: SubagentDelivery) -> CallToolResult {
     let mut meta = MetaObject::new();
+    meta.0.insert(
+        DELIVER_META_KEY.to_string(),
+        serde_json::Value::String(deliver.as_str().to_string()),
+    );
     meta.0.insert(
         "subagent_session_id".to_string(),
         serde_json::Value::String(subagent_id.to_string()),
@@ -568,7 +596,12 @@ impl SummonClient {
                 },
                 "resume": {
                     "type": "string",
-                    "description": "Subagent ID of an earlier delegate to continue. Only `instructions` can be combined with it."
+                    "description": "Subagent ID of an earlier delegate to continue. Only `instructions` and `deliver` can be combined with it."
+                },
+                "deliver": {
+                    "type": "string",
+                    "enum": ["when_idle", "asap"],
+                    "description": "When the result reaches you. when_idle (default): once you end your turn. asap: at your next step after it finishes; use it only when you need the result before you can continue."
                 }
             }
         });
@@ -582,7 +615,9 @@ impl SummonClient {
              Effective Delegation:\n\
              - Delegates know only instructions + source content\n\
              - Delegates cannot coordinate. Same-file work = conflicts.\n\
-             - You get a delegate's result back once it finishes. While it runs you can message it with steer_subagent.\n\n\
+             - Plan your critical path first. Delegate tangents and side work; do the step you are blocked on yourself.\n\
+             - A delegate runs in the background while you keep working. Its result arrives on its own, by default once you end your turn. Set `deliver: asap` only when you need the result before you can continue.\n\
+             - Do not poll, wait for or redo a delegate's work. Check on one with subagent_status; message it with steer_subagent.\n\n\
              Research (read-only): delegates explore and report back.\n\
              Work (writes): partition files strictly - no two delegates touch the same file.",
         );
@@ -644,6 +679,151 @@ impl SummonClient {
                 .idempotent(false)
                 .open_world(false),
         )
+    }
+
+    fn create_subagent_status_tool(&self) -> Tool {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Subagent ID. Omit to list your subagents."
+                }
+            }
+        });
+
+        Tool::new(
+            SUBAGENT_STATUS_TOOL_NAME,
+            "Check on your subagents without waiting for them.\n\n\
+             Without `session_id`: your subagents from this turn and any still running, with \
+             state, task, model and last activity. With `session_id`: that subagent's full final \
+             output, or its state while it runs. Results still reach you on their own; do not \
+             call this in a loop."
+                .to_string(),
+            schema.as_object().unwrap().clone(),
+        )
+        .annotate(
+            ToolAnnotations::with_title("Subagent status".to_string())
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        )
+    }
+
+    fn describe_subagent(&self, subagent: &Session, running: bool) -> String {
+        let model = subagent_model(subagent)
+            .model
+            .map(|model| format!(" on {model}"))
+            .unwrap_or_default();
+        let task = subagent_task(subagent)
+            .map(|task| format!(": {}", task_snippet(task)))
+            .unwrap_or_default();
+        let state = if running {
+            "running".to_string()
+        } else if subagent
+            .conversation
+            .as_ref()
+            .and_then(FinalOutputTool::latest_turn_output)
+            .is_some()
+        {
+            "completed".to_string()
+        } else {
+            "stopped without a final output".to_string()
+        };
+        format!(
+            "- {} [{state}{model}, {}]{task}",
+            subagent.id,
+            last_activity(subagent)
+        )
+    }
+
+    async fn handle_subagent_status(
+        &self,
+        parent_id: &str,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, String> {
+        let params: SubagentStatusParams =
+            serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+                .map_err(|e| format!("Invalid parameters: {e}"))?;
+        let services = self.services()?;
+        let session_manager = &self.context.session_manager;
+        let is_running = |subagent_id: &str| {
+            services
+                .subagent_events
+                .running_parent_of(subagent_id)
+                .as_deref()
+                == Some(parent_id)
+        };
+
+        if let Some(subagent_id) = params.session_id {
+            let subagent = session_manager
+                .get_session(&subagent_id, true)
+                .await
+                .ok()
+                .filter(|subagent| {
+                    subagent.session_type == SessionType::SubAgent
+                        && subagent.parent_session_id.as_deref() == Some(parent_id)
+                })
+                .ok_or_else(|| not_in_this_session(&subagent_id))?;
+            let running = is_running(&subagent_id);
+            let output = (!running)
+                .then(|| {
+                    subagent
+                        .conversation
+                        .as_ref()
+                        .and_then(FinalOutputTool::latest_turn_output)
+                })
+                .flatten();
+            let description = self.describe_subagent(&subagent, running);
+            return Ok(text_result(match output {
+                Some(output) => format!(
+                    "{description}\n\nFull output:\n{}",
+                    readable_output(&output)
+                ),
+                None if running => format!(
+                    "{description}\n\nIt is still working. Its result arrives on its own; \
+                     do not wait for it."
+                ),
+                None => description,
+            }));
+        }
+
+        let parent = session_manager
+            .get_session(parent_id, true)
+            .await
+            .map_err(|e| format!("Failed to get session: {e}"))?;
+        let mut subagent_ids: Vec<String> = parent
+            .conversation
+            .as_ref()
+            .and_then(|conversation| messages_since_kickoff(conversation).ok())
+            .into_iter()
+            .flatten()
+            .flat_map(|message| delegated_subagent_ids(&message.content))
+            .map(str::to_string)
+            .collect();
+        for subagent_id in services.subagent_events.running_subagents_of(parent_id) {
+            if !subagent_ids.contains(&subagent_id) {
+                subagent_ids.push(subagent_id);
+            }
+        }
+        subagent_ids.dedup();
+        if subagent_ids.is_empty() {
+            return Ok(text_result(
+                "You have no subagents running or delegated this turn.".to_string(),
+            ));
+        }
+        let mut lines = Vec::new();
+        for subagent_id in &subagent_ids {
+            if let Ok(subagent) = session_manager.get_session(subagent_id, true).await {
+                lines.push(self.describe_subagent(&subagent, is_running(subagent_id)));
+            }
+        }
+        Ok(text_result(format!(
+            "Your subagents:\n{}\n\nRead a finished one's full output with \
+             {SUBAGENT_STATUS_TOOL_NAME}(session_id: ...).",
+            lines.join("\n")
+        )))
     }
 
     fn create_ask_parent_tool(&self) -> Tool {
@@ -708,9 +888,9 @@ impl SummonClient {
             != Some(parent_id)
         {
             return Err(format!(
-                "Subagent {subagent_id} is not running in this session. To give a finished \
-                 subagent more work, call delegate with `resume: \"{subagent_id}\"` and \
-                 `instructions`"
+                "{}. To give a finished subagent more work, call delegate with \
+                 `resume: \"{subagent_id}\"` and `instructions`",
+                not_in_this_session(&subagent_id)
             ));
         }
         if services
@@ -1114,7 +1294,12 @@ impl SummonClient {
 
         if let Some(subagent_id) = &params.resume {
             return self
-                .resume_subagent(subagent_id, params.instructions, &session.id)
+                .resume_subagent(
+                    subagent_id,
+                    params.instructions,
+                    params.deliver.unwrap_or_default(),
+                    &session.id,
+                )
                 .await;
         }
         self.create_subagent(params, &session).await
@@ -1124,6 +1309,7 @@ impl SummonClient {
         &self,
         subagent_id: &str,
         instructions: Option<String>,
+        deliver: SubagentDelivery,
         parent_id: &str,
     ) -> Result<CallToolResult, String> {
         if self.services().is_ok_and(|services| {
@@ -1166,8 +1352,9 @@ impl SummonClient {
             .map_err(|e| format!("Failed to save the resume instructions: {e}"))?;
 
         Ok(delegated_result(
-            format!("Resumed subagent {subagent_id}"),
+            delegated_text("Resumed", subagent_id, deliver),
             subagent_id,
+            deliver,
         ))
     }
 
@@ -1270,12 +1457,13 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to save delegate task: {e}"))?;
 
-        let mut text = format!("Delegated to subagent {}", child.id);
+        let deliver = params.deliver.unwrap_or_default();
+        let mut text = delegated_text("Delegated to", &child.id, deliver);
         for note in &subagent_config.routing_notes {
             text.push('\n');
             text.push_str(note);
         }
-        Ok(delegated_result(text, &child.id))
+        Ok(delegated_result(text, &child.id, deliver))
     }
 
     fn validate_resume_params(&self, params: &DelegateParams) -> Result<(), String> {
@@ -1816,6 +2004,7 @@ impl McpClientTrait for SummonClient {
             let (routing, _) = RoutingTable::load(Config::global());
             tools.push(self.create_delegate_tool(routing.as_ref()));
             tools.push(self.create_steer_subagent_tool());
+            tools.push(self.create_subagent_status_tool());
         }
 
         Ok(ListToolsResult {
@@ -1841,6 +2030,10 @@ impl McpClientTrait for SummonClient {
         match name {
             STEER_SUBAGENT_TOOL_NAME => Ok(self
                 .handle_steer_subagent(session_id, arguments)
+                .await
+                .unwrap_or_else(error_result)),
+            SUBAGENT_STATUS_TOOL_NAME => Ok(self
+                .handle_subagent_status(session_id, arguments)
                 .await
                 .unwrap_or_else(error_result)),
             ASK_PARENT_TOOL_NAME => Ok(self
@@ -3634,6 +3827,7 @@ You review code."#;
             properties(&upstream),
             [
                 "context",
+                "deliver",
                 "extensions",
                 "instructions",
                 "max_turns",

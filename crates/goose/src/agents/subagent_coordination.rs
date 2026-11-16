@@ -16,7 +16,58 @@ use crate::agents::platform_extensions::summon;
 pub(crate) const STEER_SUBAGENT_TOOL_NAME: &str = "steer_subagent";
 pub(crate) const ASK_PARENT_TOOL_NAME: &str = "ask_parent";
 const DELEGATE_TOOL_NAME: &str = "delegate";
+pub(crate) const SUBAGENT_STATUS_TOOL_NAME: &str = "subagent_status";
 pub(crate) const PARENT_TOOLS_CONFIG_KEY: &str = "GOOSE_SUBAGENT_PARENT_TOOLS";
+pub(crate) const DELIVER_META_KEY: &str = "subagent_deliver";
+
+/// When a finished subagent's result reaches a parent that keeps working.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentDelivery {
+    /// Once the parent ends its turn.
+    #[default]
+    WhenIdle,
+    /// At the parent's next step after the subagent finishes.
+    Asap,
+}
+
+impl SubagentDelivery {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::WhenIdle => "when_idle",
+            Self::Asap => "asap",
+        }
+    }
+
+    pub(crate) fn from_meta(value: Option<&serde_json::Value>) -> Option<Self> {
+        match value?.as_str()? {
+            "when_idle" => Some(Self::WhenIdle),
+            "asap" => Some(Self::Asap),
+            _ => None,
+        }
+    }
+
+    fn arrival(self) -> &'static str {
+        match self {
+            Self::WhenIdle => "once you end your turn",
+            Self::Asap => "at your next step after it finishes",
+        }
+    }
+}
+
+/// The result of a `delegate` call that started or resumed `subagent_id`.
+pub(crate) fn delegated_text(
+    started: &str,
+    subagent_id: &str,
+    deliver: SubagentDelivery,
+) -> String {
+    format!(
+        "{started} subagent {subagent_id}. It runs in the background. Its result arrives on its \
+         own {}. Do not poll, wait for it or redo its work; keep going on work that does not \
+         overlap with it.",
+        deliver.arrival()
+    )
+}
 
 /// What a parent may do while its subagents run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -210,9 +261,10 @@ pub(crate) fn waiting_note(
     let guidance = match mode {
         SubagentParentTools::Full => {
             "You can keep working with all your tools while they run. Avoid editing files or \
-             state a running subagent is working on. Each result arrives here on its own when \
-             that subagent finishes, so do not poll or wait for them; when your own work is done, \
-             finish your response and the remaining results will follow."
+             state a running subagent is working on. Results arrive here on their own, once you \
+             end your turn or, for `deliver: asap`, at your next step, so do not poll or wait \
+             for them; when your own work is done, finish your response and the remaining \
+             results will follow."
                 .to_string()
         }
         SubagentParentTools::Coordination => format!(

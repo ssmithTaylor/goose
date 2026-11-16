@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use super::active_run::ActiveRunRegistry;
 use super::extension_manager::ClientContext;
 use super::tool_confirmation_coordinator::ToolConfirmationCoordinator;
+use crate::agents::AgentEvent;
 use crate::conversation::message::Message;
 use crate::session::SessionNameUpdate;
 
@@ -28,6 +29,7 @@ pub struct SessionRuntime {
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
     wakes: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     lifetimes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    turn_events: Mutex<HashMap<String, mpsc::UnboundedSender<AgentEvent>>>,
     pub(super) confirmations: ToolConfirmationCoordinator,
     pub runs: Arc<ActiveRunRegistry>,
 }
@@ -41,6 +43,7 @@ impl SessionRuntime {
             steer_queues: Mutex::new(HashMap::new()),
             wakes: Mutex::new(HashMap::new()),
             lifetimes: Mutex::new(HashMap::new()),
+            turn_events: Mutex::new(HashMap::new()),
             confirmations: ToolConfirmationCoordinator::new(),
             runs: Arc::new(ActiveRunRegistry::default()),
         }
@@ -176,6 +179,42 @@ impl SessionRuntime {
             .entry(session_id.to_string())
             .or_default()
             .clone()
+    }
+
+    /// Lets events reach the client of a session's running turn while the turn itself is busy,
+    /// as with a subagent's request for a decision during a long parent tool call.
+    pub(super) fn open_turn_events(
+        &self,
+        session_id: &str,
+        events: mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        self.turn_events
+            .lock()
+            .expect("session runtime poisoned")
+            .insert(session_id.to_string(), events);
+    }
+
+    pub(super) fn close_turn_events(
+        &self,
+        session_id: &str,
+        events: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let mut turn_events = self.turn_events.lock().expect("session runtime poisoned");
+        if turn_events
+            .get(session_id)
+            .is_some_and(|open| open.same_channel(events))
+        {
+            turn_events.remove(session_id);
+        }
+    }
+
+    /// Whether `event` went to the session's running turn.
+    pub(crate) fn emit_to_turn(&self, session_id: &str, event: AgentEvent) -> bool {
+        self.turn_events
+            .lock()
+            .expect("session runtime poisoned")
+            .get(session_id)
+            .is_some_and(|events| events.send(event).is_ok())
     }
 
     pub(super) fn wake(&self, session_id: &str) {

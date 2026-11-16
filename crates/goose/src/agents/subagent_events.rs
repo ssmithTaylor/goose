@@ -99,6 +99,27 @@ impl SubagentEventHub {
         }
     }
 
+    /// Counts the subagent as running from now on, before its run reports that it started,
+    /// until it finishes or the returned mark is dropped.
+    pub(crate) fn mark_running(
+        self: &Arc<Self>,
+        subagent_session_id: &str,
+        parent_session_id: &str,
+    ) -> RunningMark {
+        self.state
+            .lock()
+            .expect("subagent event hub poisoned")
+            .running_parents
+            .insert(
+                subagent_session_id.to_string(),
+                parent_session_id.to_string(),
+            );
+        RunningMark {
+            hub: Arc::clone(self),
+            subagent_session_id: subagent_session_id.to_string(),
+        }
+    }
+
     pub(crate) fn running_parent_of(&self, subagent_session_id: &str) -> Option<String> {
         self.state
             .lock()
@@ -165,6 +186,22 @@ impl SubagentEvents {
 impl Drop for SubagentEvents {
     fn drop(&mut self) {
         self.hub.unsubscribe(&self.parent_session_id, self.id);
+    }
+}
+
+pub(crate) struct RunningMark {
+    hub: Arc<SubagentEventHub>,
+    subagent_session_id: String,
+}
+
+impl Drop for RunningMark {
+    fn drop(&mut self) {
+        self.hub
+            .state
+            .lock()
+            .expect("subagent event hub poisoned")
+            .running_parents
+            .remove(&self.subagent_session_id);
     }
 }
 

@@ -25,6 +25,7 @@ mod steering_lifecycle;
 mod subagent_coordination;
 mod subagent_live_control;
 mod subagent_parallel_parent;
+mod subagent_result_handling;
 mod tool_lifecycle;
 
 async fn capture_state_machine_trace_fields(

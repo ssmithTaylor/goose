@@ -72,6 +72,7 @@ pub(super) use ops_skills::SkillOperation;
 pub(super) use ops_status::StatusOperation;
 pub(super) use ops_stop_hook::{StopHookOperation, DEFAULT_BLOCK_CAP};
 pub(super) use ops_subagent::{
+    delegated_subagent_ids, readable_output, subagent_task, task_snippet,
     SubagentCoordinationOperation, SubagentModelSwitchOperation, DELEGATED_META_KEY,
 };
 pub(super) use ops_tool_pair_compaction::ToolPairCompactionOperation;

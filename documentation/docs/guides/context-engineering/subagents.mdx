@@ -72,9 +72,9 @@ If a subagent fails or times out (5-minute default), you will receive no output 
 
 ## Steering and Stopping Subagents
 
-goose's turn stays open until every subagent it started has finished, but goose doesn't sit idle meanwhile. After delegating, it keeps working on the main task with all of its tools, and each subagent's result reaches it automatically when that subagent finishes. goose knows which subagents are running and what each was asked to do, and avoids editing what they are working on. When goose finishes its own work first, it waits for the remaining results and then continues. Your approval mode and hooks apply to every tool goose calls. If goose reaches its turn limit or hits an error while subagents run, the turn ends, the subagents are stopped, and goose is told which ones were cancelled.
+goose's turn stays open until every subagent it started has finished, but goose doesn't sit idle meanwhile. After delegating, it keeps working on the main task with all of its tools. Results reach goose automatically, so a finished subagent doesn't pull it off course: by default a result is held until goose ends its turn, and all results ready at that point arrive together, each with the task it answers and a capped summary (the full output stays in the subagent's session). goose delegates with `deliver: asap` when it needs a result before it can continue; that result arrives at goose's next step. Questions from subagents and your steers always arrive straight away. goose knows which subagents are running and what each was asked to do, and avoids editing what they are working on. When goose finishes its own work first, it waits for the remaining results and then continues. Your approval mode and hooks apply to every tool goose calls. If goose reaches its turn limit or hits an error while subagents run, the turn ends, the subagents are stopped, and goose is told which ones were cancelled. A recipe's structured output waits until every subagent has reported.
 
-To have goose wait for its subagents instead, set `GOOSE_SUBAGENT_PARENT_TOOLS: coordination` in your [config file](/docs/guides/config-files). goose then works only when you steer it or a subagent asks it a question, and until the subagents finish it can only steer or wrap up a subagent, start another subagent, or use read-only tools (tools whose MCP annotations mark them `readOnlyHint: true`). The default is `full`.
+To have goose wait for its subagents instead, set `GOOSE_SUBAGENT_PARENT_TOOLS: coordination` in your [config file](/docs/guides/config-files). goose then works only when you steer it or a subagent asks it a question, each result arrives as soon as goose can read it (`deliver` doesn't apply), and until the subagents finish it can only steer or wrap up a subagent, start another subagent, or use read-only tools (tools whose MCP annotations mark them `readOnlyHint: true`). The default is `full`.
 
 While subagents run:
 
@@ -83,11 +83,12 @@ While subagents run:
 - **Stop one subagent.** Use **Stop** in the subagent's view, or ACP `session/cancel` with the subagent's session ID. Only that subagent stops; goose and the other subagents continue, and goose is told the subagent was stopped.
 - **Switch a subagent's model.** Use **Model** in the subagent's view. The new model applies from the subagent's next model call, in the same session.
 
-goose itself coordinates with running subagents through two tools:
+goose itself coordinates with running subagents through these tools:
 
 | Tool | Used by | What it does |
 |---|---|---|
 | `steer_subagent` | goose | Sends a running subagent a message, answers its pending question, or with `wrap_up: true` asks it to finish now with its best result so far (reported as completed). |
+| `subagent_status` | goose | Read-only. Lists goose's subagents from this turn with their state, task, model and last activity, or with a session ID returns one subagent's full output. |
 | `ask_parent` | subagent | Asks goose a question and waits for the answer. |
 
 ## Internal Subagents

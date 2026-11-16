@@ -14,7 +14,8 @@ use crate::agents::state_machine::{
     applied, not_applicable, yielded, Emitter, GooseEffect, Operation, OperationResult,
 };
 use crate::agents::subagent_coordination::{
-    waiting_note, RunningSubagent, SubagentCoordination, SubagentParentTools,
+    waiting_note, RunningSubagent, SubagentCoordination, SubagentDelivery, SubagentParentTools,
+    DELIVER_META_KEY, SUBAGENT_STATUS_TOOL_NAME,
 };
 use crate::agents::subagent_events::{SubagentEventHub, SubagentModel};
 use crate::agents::subagent_handler::{subagent_model, ForegroundSubagentRunner};
@@ -32,12 +33,12 @@ fn inline_notice(text: String) -> Message {
     Message::assistant().with_system_notification(SystemNotificationType::InlineMessage, text)
 }
 
-fn task_snippet(task: &str) -> String {
+pub(crate) fn task_snippet(task: &str) -> String {
     let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
     safe_truncate(&task, TASK_SNIPPET_CHARS)
 }
 
-fn subagent_task(subagent: &Session) -> Option<&str> {
+pub(crate) fn subagent_task(subagent: &Session) -> Option<&str> {
     let recipe = subagent.recipe.as_ref()?;
     recipe.prompt.as_deref().or(recipe.instructions.as_deref())
 }
@@ -92,7 +93,9 @@ fn ended(outcome: SubagentOutcome) -> BoxStream<'static, SubagentUpdate> {
     ))))
 }
 
-fn delegated_subagent_ids(content: &[MessageContent]) -> impl Iterator<Item = &str> {
+fn delegations(
+    content: &[MessageContent],
+) -> impl Iterator<Item = (&str, Option<SubagentDelivery>)> {
     content.iter().filter_map(|content| {
         let MessageContent::ToolResponse(response) = content else {
             return None;
@@ -104,11 +107,130 @@ fn delegated_subagent_ids(content: &[MessageContent]) -> impl Iterator<Item = &s
         {
             return None;
         }
-        meta.0.get("subagent_session_id")?.as_str()
+        let subagent_id = meta.0.get("subagent_session_id")?.as_str()?;
+        Some((
+            subagent_id,
+            SubagentDelivery::from_meta(meta.0.get(DELIVER_META_KEY)),
+        ))
     })
 }
 
-fn readable_output(output: &str) -> String {
+pub(crate) fn delegated_subagent_ids(content: &[MessageContent]) -> impl Iterator<Item = &str> {
+    delegations(content).map(|(subagent_id, _)| subagent_id)
+}
+
+pub(crate) const SUMMARY_CHAR_LIMIT: usize = 4_000;
+const MIN_SUMMARY_CHARS: usize = 400;
+const CHARS_PER_TOKEN: usize = 4;
+/// Results delivered at once take at most this fraction of the parent's remaining context.
+const RESULTS_CONTEXT_SHARE: usize = 10;
+
+/// What one subagent reported, as its parent reads it.
+pub(crate) struct SubagentReport {
+    pub id: String,
+    pub outcome: SubagentOutcome,
+    pub model: Option<String>,
+    pub task: Option<String>,
+}
+
+fn remaining_context_tokens(session: &Session) -> Option<usize> {
+    let limit = session.model_config.as_ref()?.context_limit();
+    let used = usize::try_from(session.usage.input_tokens?).ok()?;
+    Some(limit.saturating_sub(used))
+}
+
+/// Characters each summary may take: the fixed limit, or less when the parent's remaining
+/// context is short, never below a floor that still says something.
+pub(crate) fn summary_cap(remaining_context_tokens: Option<usize>, reports: usize) -> usize {
+    let Some(remaining) = remaining_context_tokens else {
+        return SUMMARY_CHAR_LIMIT;
+    };
+    let share = remaining.saturating_mul(CHARS_PER_TOKEN) / RESULTS_CONTEXT_SHARE / reports.max(1);
+    share.clamp(MIN_SUMMARY_CHARS, SUMMARY_CHAR_LIMIT)
+}
+
+fn status_call(subagent_id: &str) -> String {
+    format!("{SUBAGENT_STATUS_TOOL_NAME}(session_id: \"{subagent_id}\")")
+}
+
+pub(crate) fn capped_summary(summary: &str, cap: usize, subagent_id: &str) -> String {
+    let chars = summary.chars().count();
+    if chars <= cap {
+        return summary.to_string();
+    }
+    let tail_chars = cap / 3;
+    let head_chars = cap - tail_chars;
+    let head: String = summary.chars().take(head_chars).collect();
+    let tail: String = summary.chars().skip(chars - tail_chars).collect();
+    format!(
+        "{head}\n[... {} characters left out; read them with {} ...]\n{tail}",
+        chars - head_chars - tail_chars,
+        status_call(subagent_id)
+    )
+}
+
+/// One message for every subagent result ready at a delivery point.
+pub(crate) fn results_text(
+    reports: &[SubagentReport],
+    still_running: &[String],
+    cap: usize,
+) -> String {
+    let mut sections = Vec::new();
+    for report in reports {
+        let on_model = report
+            .model
+            .as_deref()
+            .map(|model| format!(" on {model}"))
+            .unwrap_or_default();
+        let id = &report.id;
+        let mut lines = vec![match &report.outcome {
+            SubagentOutcome::Completed(_) => format!("Subagent {id} completed{on_model}."),
+            SubagentOutcome::Failed(_) => format!("Subagent {id} failed{on_model}."),
+            SubagentOutcome::Cancelled => {
+                format!("Subagent {id} was cancelled before it finished.")
+            }
+        }];
+        if let Some(task) = &report.task {
+            lines.push(format!("Task you gave it: {task}"));
+        }
+        lines.push("You may have moved on since you delegated this.".to_string());
+        match &report.outcome {
+            SubagentOutcome::Completed(output) => {
+                lines.push("Its own report, not verified:".to_string());
+                lines.push(capped_summary(&readable_output(output), cap, id));
+                lines.push(format!("Full output: {}", status_call(id)));
+            }
+            SubagentOutcome::Failed(reason) => {
+                lines.push("Why it stopped:".to_string());
+                lines.push(capped_summary(reason, cap, id));
+                lines.push(format!("Its session: {}", status_call(id)));
+            }
+            SubagentOutcome::Cancelled => {
+                lines.push(format!(
+                    "Any partial work is in its session: {}",
+                    status_call(id)
+                ));
+            }
+        }
+        lines.push(
+            "Change course only if this affects what you are doing now; otherwise note it and \
+             continue, or finish if you are done."
+                .to_string(),
+        );
+        sections.push(lines.join("\n"));
+    }
+    sections.push(if still_running.is_empty() {
+        "No other subagents are running.".to_string()
+    } else {
+        format!(
+            "Still running: {}. Their results arrive on their own.",
+            still_running.join(", ")
+        )
+    });
+    sections.join("\n\n")
+}
+
+pub(crate) fn readable_output(output: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(output) {
         Ok(serde_json::Value::Object(fields)) if fields.len() == 1 => fields
             .get("summary")
@@ -170,6 +292,43 @@ impl SubagentRunner<Session> for ForegroundSubagentRunner {
         let parent_id = parent_session.id.clone();
         Box::pin(
             stream::once(future::ready(notice)).chain(self.spawn(subagent, parent_id, &cancel)),
+        )
+    }
+
+    fn delivers_when_idle(
+        &self,
+        _parent_session: &Session,
+        message: &Message,
+        subagent_session_id: &str,
+    ) -> bool {
+        delegations(&message.content).any(|(subagent_id, deliver)| {
+            subagent_id == subagent_session_id && deliver == Some(SubagentDelivery::WhenIdle)
+        })
+    }
+
+    async fn results_message(
+        &self,
+        parent_session: &Session,
+        outcomes: &[(String, SubagentOutcome)],
+        still_running: &[String],
+    ) -> Option<Message> {
+        let mut reports = Vec::new();
+        for (subagent_id, outcome) in outcomes {
+            let subagent = self.load(subagent_id).await.ok();
+            reports.push(SubagentReport {
+                id: subagent_id.clone(),
+                outcome: outcome.clone(),
+                model: subagent
+                    .as_ref()
+                    .and_then(|subagent| subagent_model(subagent).model),
+                task: subagent.as_ref().and_then(subagent_task).map(task_snippet),
+            });
+        }
+        let cap = summary_cap(remaining_context_tokens(parent_session), reports.len());
+        Some(
+            Message::user()
+                .with_text(results_text(&reports, still_running, cap))
+                .with_visibility(false, true),
         )
     }
 
@@ -339,6 +498,85 @@ mod tests {
     use crate::conversation::Conversation;
     use crate::session::SessionManager;
     use goose_agent::machine::EffectHandler;
+
+    #[test]
+    fn results_for_the_parent_follow_the_template() {
+        let reports = [
+            SubagentReport {
+                id: "alpha".to_string(),
+                outcome: SubagentOutcome::Completed(r#"{"summary":"found the bug"}"#.to_string()),
+                model: Some("gpt-4o".to_string()),
+                task: Some("find the bug".to_string()),
+            },
+            SubagentReport {
+                id: "beta".to_string(),
+                outcome: SubagentOutcome::Failed("ran out of turns".to_string()),
+                model: None,
+                task: None,
+            },
+            SubagentReport {
+                id: "gamma".to_string(),
+                outcome: SubagentOutcome::Cancelled,
+                model: Some("gpt-4o".to_string()),
+                task: Some("write docs".to_string()),
+            },
+        ];
+        let rule = "Change course only if this affects what you are doing now; otherwise note \
+                    it and continue, or finish if you are done.";
+        assert_eq!(
+            results_text(&reports, &["delta".to_string()], SUMMARY_CHAR_LIMIT),
+            format!(
+                "Subagent alpha completed on gpt-4o.\n\
+                 Task you gave it: find the bug\n\
+                 You may have moved on since you delegated this.\n\
+                 Its own report, not verified:\n\
+                 found the bug\n\
+                 Full output: subagent_status(session_id: \"alpha\")\n\
+                 {rule}\n\n\
+                 Subagent beta failed.\n\
+                 You may have moved on since you delegated this.\n\
+                 Why it stopped:\n\
+                 ran out of turns\n\
+                 Its session: subagent_status(session_id: \"beta\")\n\
+                 {rule}\n\n\
+                 Subagent gamma was cancelled before it finished.\n\
+                 Task you gave it: write docs\n\
+                 You may have moved on since you delegated this.\n\
+                 Any partial work is in its session: subagent_status(session_id: \"gamma\")\n\
+                 {rule}\n\n\
+                 Still running: delta. Their results arrive on their own."
+            )
+        );
+        assert!(results_text(&reports[..1], &[], SUMMARY_CHAR_LIMIT)
+            .ends_with("No other subagents are running."));
+    }
+
+    #[test]
+    fn summaries_are_capped_by_the_limit_and_the_remaining_context() {
+        assert_eq!(summary_cap(None, 1), SUMMARY_CHAR_LIMIT);
+        assert_eq!(summary_cap(Some(1_000_000), 2), SUMMARY_CHAR_LIMIT);
+        assert_eq!(summary_cap(Some(5_000), 1), 2_000);
+        assert_eq!(summary_cap(Some(5_000), 2), 1_000);
+        assert_eq!(summary_cap(Some(100), 1), MIN_SUMMARY_CHARS);
+
+        let summary = format!(
+            "{}{}{}",
+            "h".repeat(700),
+            "m".repeat(2_000),
+            "t".repeat(300)
+        );
+        let capped = capped_summary(&summary, 900, "alpha");
+        assert_eq!(
+            capped,
+            format!(
+                "{}\n[... 2100 characters left out; read them with \
+                 subagent_status(session_id: \"alpha\") ...]\n{}",
+                "h".repeat(600),
+                "t".repeat(300)
+            )
+        );
+        assert_eq!(capped_summary("short", 900, "alpha"), "short");
+    }
 
     const OPERATION_NAME: &str = "foreground_subagent";
     const DELIVERED: &str = "delivered";

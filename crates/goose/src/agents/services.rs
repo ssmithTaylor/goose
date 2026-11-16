@@ -1161,6 +1161,7 @@ impl StateMachineServices {
         Ok(Box::pin(
             async_stream::try_stream! {
                 let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+                let turn_events = TurnEvents::open(self, &session_id, tx.clone());
                 let emit = Emitter::new(tx, cancel.clone());
                 let result = {
                     let run = crate::session_context::with_session_id(
@@ -1181,6 +1182,7 @@ impl StateMachineServices {
                         }
                     }
                 };
+                drop(turn_events);
                 result?;
                 // Without this the drain below never ends: `run` only borrows the emitter.
                 drop(emit);
@@ -1429,6 +1431,38 @@ impl Drop for TurnEnd {
             let services = Arc::clone(&self.services);
             handle.spawn(async move { services.trim_sessions().await });
         }
+    }
+}
+
+/// Keeps a turn's event channel reachable from outside the turn while it runs.
+struct TurnEvents<'a> {
+    services: &'a StateMachineServices,
+    session_id: String,
+    events: mpsc::UnboundedSender<AgentEvent>,
+}
+
+impl<'a> TurnEvents<'a> {
+    fn open(
+        services: &'a StateMachineServices,
+        session_id: &str,
+        events: mpsc::UnboundedSender<AgentEvent>,
+    ) -> Self {
+        services
+            .runtime
+            .open_turn_events(session_id, events.clone());
+        Self {
+            services,
+            session_id: session_id.to_string(),
+            events,
+        }
+    }
+}
+
+impl Drop for TurnEvents<'_> {
+    fn drop(&mut self) {
+        self.services
+            .runtime
+            .close_turn_events(&self.session_id, &self.events);
     }
 }
 

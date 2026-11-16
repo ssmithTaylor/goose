@@ -210,8 +210,16 @@ async fn results_wait_for_a_parent_tool_call_and_arrive_once_each() -> Result<()
         .permission_manager
         .update_user_permission("delegate", PermissionLevel::AlwaysAllow);
     api.on("hand off two").calls([
-        ("delegate-alpha", "delegate", delegate("task alpha")),
-        ("delegate-beta", "delegate", delegate("task beta")),
+        (
+            "delegate-alpha",
+            "delegate",
+            json!({ "instructions": "task alpha", "deliver": "asap" }),
+        ),
+        (
+            "delegate-beta",
+            "delegate",
+            json!({ "instructions": "task beta", "deliver": "asap" }),
+        ),
     ]);
     api.on("task alpha").reply("alpha is reading");
     api.on("task beta").reply("beta is reading");
